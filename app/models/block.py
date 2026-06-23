@@ -18,9 +18,8 @@ class Block(Base):
     title: Mapped[str] = mapped_column(String(100), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     order: Mapped[int] = mapped_column(Integer, default=0)
-    verification_status: Mapped[str] = mapped_column(
-        String(50), default="unverified"
-    )  # pending | verified | unverified
+    verification_status: Mapped[str] = mapped_column(String(50), default="unverified")
+    is_public: Mapped[bool] = mapped_column(default=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

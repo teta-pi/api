@@ -8,12 +8,14 @@ class BlockCreate(BaseModel):
     title: str
     description: str | None = None
     order: int = 0
+    is_public: bool = True
 
 
 class BlockUpdate(BaseModel):
     title: str | None = None
     description: str | None = None
     order: int | None = None
+    is_public: bool | None = None
 
 
 class BlockReorder(BaseModel):
@@ -41,6 +43,7 @@ class BlockOut(BaseModel):
     title: str
     description: str | None
     order: int
+    is_public: bool
     verification_status: str
     media: list[MediaOut]
     created_at: datetime

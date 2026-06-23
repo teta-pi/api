@@ -1,3 +1,4 @@
+import enum
 import uuid
 from datetime import datetime
 
@@ -8,6 +9,12 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
 
 
+class EntityType(str, enum.Enum):
+    business = "business"
+    person = "person"
+    organization = "organization"
+
+
 class Business(Base):
     __tablename__ = "businesses"
 
@@ -15,25 +22,27 @@ class Business(Base):
     owner_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
     )
+    entity_type: Mapped[str] = mapped_column(String(50), default="business")
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     slug: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    country: Mapped[str | None] = mapped_column(String(2), nullable=True)  # ISO 3166-1 alpha-2
+    country: Mapped[str | None] = mapped_column(String(2), nullable=True)
 
     registry_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    registry_status: Mapped[str] = mapped_column(
-        String(50), default="pending"
-    )  # pending | verified | failed | multiple_matches
+    registry_status: Mapped[str] = mapped_column(String(50), default="pending")
     registry_data: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
-    # none | registry | partial | full | live
     verification_level: Mapped[str] = mapped_column(String(50), default="none")
     ai_categories: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
-    # pgvector column — added via migration after pgvector extension is enabled
-    # embedding: vector(1536) — declared in migration, not here (SQLAlchemy pgvector support varies)
+    # Agent endpoint declared by the entity owner, verified by endpoint_verification module
+    agent_endpoint: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    agent_endpoint_verified: Mapped[bool] = mapped_column(default=False)
 
+    # Privacy: True → indexed + discoverable; False → verifiable by exact ID only
+    is_public: Mapped[bool] = mapped_column(default=True)
     is_published: Mapped[bool] = mapped_column(default=False)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

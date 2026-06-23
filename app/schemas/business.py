@@ -1,20 +1,24 @@
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, HttpUrl
 
 
 class BusinessCreate(BaseModel):
     name: str
     description: str | None = None
     country: str | None = None
+    entity_type: str = "business"
 
 
 class BusinessUpdate(BaseModel):
     name: str | None = None
     description: str | None = None
     country: str | None = None
+    entity_type: str | None = None
     is_published: bool | None = None
+    is_public: bool | None = None
+    agent_endpoint: str | None = None
 
 
 class RegistryData(BaseModel):
@@ -31,6 +35,7 @@ class BusinessOut(BaseModel):
     model_config = {"from_attributes": True}
 
     id: uuid.UUID
+    entity_type: str
     name: str
     slug: str
     description: str | None
@@ -40,6 +45,9 @@ class BusinessOut(BaseModel):
     registry_data: dict | None
     verification_level: str
     ai_categories: dict | None
+    agent_endpoint: str | None
+    agent_endpoint_verified: bool
+    is_public: bool
     is_published: bool
     created_at: datetime
     updated_at: datetime
@@ -47,6 +55,7 @@ class BusinessOut(BaseModel):
 
 class BusinessSearchResult(BaseModel):
     id: uuid.UUID
+    entity_type: str
     name: str
     slug: str
     description: str | None
@@ -58,12 +67,17 @@ class BusinessSearchResult(BaseModel):
     registry_id: str | None
     registry_data: dict | None
     ai_categories: dict | None
+    agent_endpoint: str | None
+    agent_endpoint_verified: bool
 
 
 class AgentBusinessProfile(BaseModel):
     id: uuid.UUID
+    entity_type: str
     name: str
     description: str | None
     registry: dict | None
     trust_level: str
+    agent_endpoint: str | None
+    agent_endpoint_verified: bool
     blocks: list[dict]

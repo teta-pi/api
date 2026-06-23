@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
 from app.core.database import engine, Base
-from app.api.routes import auth, businesses, blocks, media, search
+from app.api.routes import auth, businesses, blocks, media, search, endpoint_verification, intent
 
 
 @asynccontextmanager
@@ -38,6 +38,8 @@ app.include_router(blocks.blocks_router, prefix="/api/v1")
 app.include_router(media.router, prefix="/api/v1")
 app.include_router(media.devices_router, prefix="/api/v1")
 app.include_router(search.router, prefix="/api/v1")
+app.include_router(endpoint_verification.router, prefix="/api/v1")
+app.include_router(intent.router, prefix="/api/v1")
 
 
 @app.get("/health")
