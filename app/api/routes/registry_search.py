@@ -24,8 +24,7 @@ async def registry_search(
             "founded": r.founded,
             "address": r.address,
             "registry": r.registry,
-            "country": country or _infer_country(r.registry),
-            "error": r.error,
+            "country": (r.raw or {}).get("country") or country or _infer_country(r.registry),
         }
         for r in results
         if r.found
@@ -40,4 +39,6 @@ def _infer_country(registry_name: str) -> str:
         return "DE"
     if "companies house" in low or "uk" in low:
         return "GB"
+    if "sec" in low or "edgar" in low:
+        return "US"
     return ""

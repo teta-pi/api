@@ -1,22 +1,116 @@
 import hashlib
+import json
 import secrets
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
 from app.core.database import get_db
-from app.models.media import Media
+from app.core.redis import get_redis
+from app.models.business import Business
 from app.models.device import Device
+from app.models.media import Media
 from app.models.user import User
-from app.schemas.media import DeviceRegisterRequest, DeviceRegisterResponse, MediaUploadResponse, MediaVerifyResponse
+from app.schemas.media import (
+    DeviceMediaUploadResponse,
+    DeviceRegisterRequest,
+    DeviceRegisterResponse,
+    MediaUploadResponse,
+    MediaVerifyResponse,
+    QRTokenResponse,
+)
 from app.services import c2pa as c2pa_service
 
 router = APIRouter(prefix="/media", tags=["media"])
 devices_router = APIRouter(prefix="/devices", tags=["devices"])
+
+_TOKEN_TTL = 900  # 15 minutes
+
+
+# ── Device media upload (api_key auth) ───────────────────────────────────────
+
+
+async def _get_device(
+    x_device_api_key: str = Header(..., alias="X-Device-Api-Key"),
+    db: AsyncSession = Depends(get_db),
+) -> Device:
+    result = await db.execute(
+        select(Device).where(Device.api_key == x_device_api_key, Device.is_active.is_(True))
+    )
+    device = result.scalar_one_or_none()
+    if not device:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid device key")
+    return device
+
+
+@router.post("/device-upload", response_model=DeviceMediaUploadResponse)
+async def device_upload_media(
+    file: UploadFile = File(...),
+    manifest_json: str | None = Form(None),
+    captured_at: str | None = Form(None),
+    device: Device = Depends(_get_device),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Upload media from a registered Pi CAM device using its api_key."""
+    content = await file.read()
+    original_hash = hashlib.sha256(content).hexdigest()
+
+    mime_type = file.content_type or "application/octet-stream"
+
+    # Try embedded C2PA first, then sidecar JSON passed from the app
+    manifest = c2pa_service.extract_c2pa_manifest(content, mime_type)
+    if not manifest and manifest_json:
+        manifest = c2pa_service.extract_c2pa_manifest_from_json(manifest_json)
+
+    c2pa_verified = False
+    c2pa_signer = None
+    teta_pi_verified = False
+
+    if manifest:
+        c2pa_verified, c2pa_signer = c2pa_service.verify_pi_camera_signature(manifest)
+        if c2pa_verified:
+            manifest = c2pa_service.add_teta_pi_countersignature(manifest)
+            teta_pi_verified = True
+
+    storage_url = f"s3://tetapi-media/{uuid.uuid4()}/{file.filename}"
+
+    captured_dt = None
+    if captured_at:
+        try:
+            captured_dt = datetime.fromisoformat(captured_at)
+        except ValueError:
+            pass
+
+    media = Media(
+        block_id=None,
+        type=mime_type.split("/")[0],
+        storage_url=storage_url,
+        original_hash=original_hash,
+        c2pa_manifest=manifest,
+        c2pa_verified=c2pa_verified,
+        c2pa_signer=c2pa_signer,
+        captured_at=captured_dt,
+    )
+    db.add(media)
+    await db.flush()
+
+    from app.workers.tasks.bitcoin import submit_bitcoin_timestamp
+    submit_bitcoin_timestamp.delay(str(media.id), content.hex())
+
+    return {
+        "media_id": media.id,
+        "c2pa_verified": c2pa_verified,
+        "c2pa_signer": c2pa_signer,
+        "bitcoin_status": "pending",
+        "teta_pi_verified": teta_pi_verified,
+    }
+
+
+# ── Standard user media upload (JWT auth) ────────────────────────────────────
 
 
 @router.post("/upload", response_model=MediaUploadResponse)
@@ -31,8 +125,6 @@ async def upload_media(
     content = await file.read()
     original_hash = hashlib.sha256(content).hexdigest()
 
-    # Extract and verify C2PA manifest (optional — non-C2PA media is accepted,
-    # stored with c2pa_verified=False and still submitted to Bitcoin OTS)
     mime_type = file.content_type or "application/octet-stream"
     manifest = c2pa_service.extract_c2pa_manifest(content, mime_type)
     c2pa_verified = False
@@ -43,7 +135,6 @@ async def upload_media(
         if c2pa_verified:
             manifest = c2pa_service.add_teta_pi_countersignature(manifest)
 
-    # Store in S3/MinIO (stub — returns a local path for Sprint 1)
     storage_url = f"s3://tetapi-media/{uuid.uuid4()}/{file.filename}"
 
     captured_dt = None
@@ -66,7 +157,6 @@ async def upload_media(
     db.add(media)
     await db.flush()
 
-    # Submit hash to OpenTimestamps async
     from app.workers.tasks.bitcoin import submit_bitcoin_timestamp
     submit_bitcoin_timestamp.delay(str(media.id), content.hex())
 
@@ -95,8 +185,8 @@ async def verify_media(
         "c2pa_verified_at": media.uploaded_at if media.c2pa_verified else None,
         "bitcoin_status": "confirmed" if media.bitcoin_confirmed else "pending",
         "bitcoin_block": media.bitcoin_block,
-        "bitcoin_confirmed_at": None,  # TODO: store confirmation timestamp
-        "ots_proof_url": f"https://teta-pi.io/proofs/{media.id}.ots" if media.bitcoin_confirmed else None,
+        "bitcoin_confirmed_at": None,
+        "ots_proof_url": f"https://tetapi.dev/proofs/{media.id}.ots" if media.bitcoin_confirmed else None,
     }
 
 
@@ -106,31 +196,114 @@ async def delete_media(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> None:
-    result = await db.execute(select(Media).where(Media.id == media_id))
+    from app.models.block import Block
+
+    result = await db.execute(
+        select(Media)
+        .join(Block, Media.block_id == Block.id)
+        .join(Business, Block.business_id == Business.id)
+        .where(Media.id == media_id)
+    )
     media = result.scalar_one_or_none()
     if not media:
         raise HTTPException(status_code=404, detail="Media not found")
+
+    block_result = await db.execute(
+        select(Business.owner_id)
+        .join(Block, Business.id == Block.business_id)
+        .where(Block.id == media.block_id)
+    )
+    owner_id = block_result.scalar_one_or_none()
+    if owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not your media")
+
     await db.delete(media)
+    await db.flush()
+
+
+# ── Device registration (QR token flow) ──────────────────────────────────────
+
+
+@devices_router.post("/generate-token", response_model=QRTokenResponse)
+async def generate_registration_token(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    redis=Depends(get_redis),
+) -> dict:
+    """
+    Called from tetapi.dev by an authenticated user.
+    Returns a short-lived token that Pi CAM scans as a QR code.
+    """
+    result = await db.execute(
+        select(Business).where(Business.owner_id == current_user.id).limit(1)
+    )
+    business = result.scalar_one_or_none()
+    if not business:
+        raise HTTPException(status_code=400, detail="No business found — create one first")
+
+    token = secrets.token_urlsafe(32)
+    payload = json.dumps({
+        "business_id": str(business.id),
+        "entity_name": business.name,
+        "user_id": str(current_user.id),
+    })
+    await redis.setex(f"cam_reg:{token}", _TOKEN_TTL, payload)
+
+    return {
+        "token": token,
+        "entity_id": str(business.id),
+        "entity_name": business.name,
+        "expires_in": _TOKEN_TTL,
+    }
 
 
 @devices_router.post("/register", response_model=DeviceRegisterResponse)
 async def register_device(
     payload: DeviceRegisterRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    redis=Depends(get_redis),
 ) -> dict:
-    api_key = f"pk_live_{secrets.token_urlsafe(32)}"
-    device = Device(
-        business_id=payload.business_id,
-        label=payload.label,
-        device_fingerprint=payload.device_fingerprint,
-        device_public_key=payload.device_public_key,
-        api_key=api_key,
+    """
+    Called by Pi CAM after scanning the QR code.
+    No JWT required — authenticated via short-lived registration token.
+    """
+    raw = await redis.get(f"cam_reg:{payload.registration_token}")
+    if not raw:
+        raise HTTPException(status_code=400, detail="Invalid or expired registration token")
+
+    token_data = json.loads(raw)
+    business_id = uuid.UUID(token_data["business_id"])
+    entity_name = token_data["entity_name"]
+
+    # Idempotent: same fingerprint → update public key and reactivate
+    existing = await db.execute(
+        select(Device).where(Device.device_fingerprint == payload.device_fingerprint)
     )
-    db.add(device)
+    device = existing.scalar_one_or_none()
+
+    if device:
+        device.device_public_key = payload.device_public_key
+        device.is_active = True
+    else:
+        api_key = f"pk_live_{secrets.token_urlsafe(32)}"
+        device = Device(
+            business_id=business_id,
+            label=payload.label,
+            device_fingerprint=payload.device_fingerprint,
+            device_public_key=payload.device_public_key,
+            api_key=api_key,
+        )
+        db.add(device)
+
     await db.flush()
+
+    # One-time token — consume it
+    await redis.delete(f"cam_reg:{payload.registration_token}")
+
     return {
         "device_id": device.id,
-        "api_key": api_key,
+        "api_key": device.api_key,
+        "entity_id": str(business_id),
+        "entity_name": entity_name,
         "registered_at": device.registered_at,
     }

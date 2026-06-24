@@ -23,13 +23,30 @@ class MediaVerifyResponse(BaseModel):
 
 
 class DeviceRegisterRequest(BaseModel):
-    business_id: uuid.UUID
+    registration_token: str
     device_fingerprint: str
     device_public_key: str
-    label: str = "PI Camera"
+    label: str = "Pi CAM"
 
 
 class DeviceRegisterResponse(BaseModel):
     device_id: uuid.UUID
     api_key: str
+    entity_id: str
+    entity_name: str
     registered_at: datetime
+
+
+class QRTokenResponse(BaseModel):
+    token: str
+    entity_id: str
+    entity_name: str
+    expires_in: int = 900  # seconds
+
+
+class DeviceMediaUploadResponse(BaseModel):
+    media_id: uuid.UUID
+    c2pa_verified: bool
+    c2pa_signer: str | None
+    bitcoin_status: str
+    teta_pi_verified: bool = False

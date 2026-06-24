@@ -57,11 +57,11 @@ class IntentResolver:
         if intent.verified_only:
             stmt = stmt.where(Business.verification_level != "none")
         if location:
-            from sqlalchemy import or_
+            from sqlalchemy import String, cast, or_
             stmt = stmt.where(
                 or_(
                     Business.country.ilike(f"%{location[:2]}%"),
-                    Business.registry_data.cast(sa_text()).ilike(f"%{location}%"),
+                    cast(Business.registry_data, String).ilike(f"%{location}%"),
                 )
             )
         if intent.has_agent_endpoint is True:
@@ -111,5 +111,3 @@ class IntentResolver:
         return resolved[:10]
 
 
-# SQLAlchemy text cast helper
-from sqlalchemy import Text as sa_text  # noqa: E402

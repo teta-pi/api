@@ -108,6 +108,8 @@ async def reorder_blocks(
     for i, block_id in enumerate(payload.block_ids):
         result = await db.execute(select(Block).where(Block.id == block_id))
         block = result.scalar_one_or_none()
-        if block:
-            block.order = i
+        if not block:
+            continue
+        await _get_owned_business(block.business_id, current_user, db)
+        block.order = i
     return {"ok": True}

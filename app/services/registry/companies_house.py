@@ -35,7 +35,7 @@ class UKCompaniesHouseVerifier(RegistryVerifier):
                 )
                 resp.raise_for_status()
                 data = resp.json()
-            except httpx.HTTPError as e:
+            except (httpx.HTTPError, ValueError) as e:
                 return [RegistryResult(found=False, registry=self.registry_name, error=str(e))]
 
         results = []

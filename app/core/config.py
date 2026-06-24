@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     germany_hr_api_url: str = "https://www.handelsregister.de/rp_web/search"
     uk_companies_house_api_key: str = ""
     uk_companies_house_api_url: str = "https://api.company-information.service.gov.uk"
+    opencorporates_api_key: str = ""
 
     pi_camera_root_ca_pem: str = ""
 

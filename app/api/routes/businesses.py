@@ -118,6 +118,7 @@ async def publish_business(
             detail="Business must be registry-verified before publishing",
         )
     business.is_published = True
+    await db.flush()
     return business
 
 
@@ -157,8 +158,9 @@ async def update_business(
     for field, value in payload.model_dump(exclude_none=True).items():
         setattr(business, field, value)
 
+    await db.flush()
+
     if payload.name:
-        # Re-trigger registry verification on name change
         from app.workers.tasks.verification import verify_registry_task
         verify_registry_task.delay(str(business.id), payload.name, business.country)
 
