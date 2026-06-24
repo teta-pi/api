@@ -12,8 +12,8 @@ class Media(Base):
     __tablename__ = "media"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    block_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("blocks.id"), nullable=False
+    block_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("blocks.id"), nullable=True
     )
     type: Mapped[str] = mapped_column(String(20), nullable=False)  # video | photo | file
     storage_url: Mapped[str] = mapped_column(String(1024), nullable=False)
