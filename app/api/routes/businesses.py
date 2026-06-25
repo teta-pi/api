@@ -1,14 +1,14 @@
+import logging
 import re
 import uuid
-from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
-from app.core.database import get_db
+from app.core.database import get_db, AsyncSessionLocal
 from app.models.business import Business
 from app.models.block import Block
 from app.models.media import Media
@@ -21,6 +21,7 @@ from app.schemas.business import (
 )
 from app.services.registry import verify_business_in_registry
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/businesses", tags=["businesses"])
 
 
@@ -51,17 +52,49 @@ def _compute_verification_level(business: Business) -> str:
     return "registry"
 
 
+async def _run_registry_verification(business_id: str, name: str, country: str | None) -> None:
+    """Run registry verification inline (no Celery needed)."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(Business).where(Business.id == business_id))
+        business = result.scalar_one_or_none()
+        if not business:
+            return
+        try:
+            matches = await verify_business_in_registry(name, country)
+            if matches:
+                best = matches[0]
+                business.registry_status = "verified"
+                business.registry_id = best.registration_number
+                business.registry_data = {
+                    "legal_name": best.legal_name,
+                    "registry": best.registry,
+                    "status": best.status,
+                    "founded": best.founded,
+                    "address": best.address,
+                    "country": (best.raw or {}).get("country") or country or "",
+                }
+                business.verification_level = "registry"
+            else:
+                business.registry_status = "not_found"
+        except Exception as e:
+            logger.warning("Registry verification failed for %s: %s", business_id, e)
+            business.registry_status = "not_found"
+        await session.commit()
+
+
 @router.post("", response_model=BusinessOut, status_code=status.HTTP_201_CREATED)
 async def create_business(
     payload: BusinessCreate,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> Business:
     slug = _slugify(payload.name)
-    # Ensure unique slug
     existing = await db.execute(select(Business).where(Business.slug == slug))
     if existing.scalar_one_or_none():
         slug = f"{slug}-{uuid.uuid4().hex[:6]}"
+
+    is_business = payload.entity_type == "business"
 
     business = Business(
         owner_id=current_user.id,
@@ -69,16 +102,25 @@ async def create_business(
         slug=slug,
         description=payload.description,
         country=payload.country,
+        entity_type=payload.entity_type,
+        # Non-business entities (journalists/artists/orgs) are self-asserted:
+        # they're verified by email, not by registry
+        registry_status="self_asserted" if not is_business else "pending",
+        verification_level="registry" if not is_business else "none",
+        is_published=not is_business,  # Non-business goes live immediately
+        is_public=not is_business,
     )
     db.add(business)
     await db.flush()
+    await db.refresh(business)
 
-    # Trigger async registry verification (Celery optional — no worker on small server)
-    try:
-        from app.workers.tasks.verification import verify_registry_task
-        verify_registry_task.delay(str(business.id), payload.name, payload.country)
-    except Exception:
-        pass
+    if is_business:
+        background_tasks.add_task(
+            _run_registry_verification,
+            str(business.id),
+            payload.name,
+            payload.country,
+        )
 
     return business
 
@@ -115,12 +157,13 @@ async def publish_business(
         raise HTTPException(status_code=404, detail="Business not found")
     if business.owner_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not your business")
-    if business.registry_status != "verified":
+    if business.entity_type == "business" and business.registry_status not in ("verified",):
         raise HTTPException(
             status_code=400,
             detail="Business must be registry-verified before publishing",
         )
     business.is_published = True
+    business.is_public = True
     await db.flush()
     return business
 
@@ -148,6 +191,7 @@ async def get_business(
 async def update_business(
     business_id: uuid.UUID,
     payload: BusinessUpdate,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> Business:
@@ -163,12 +207,10 @@ async def update_business(
 
     await db.flush()
 
-    if payload.name:
-        try:
-            from app.workers.tasks.verification import verify_registry_task
-            verify_registry_task.delay(str(business.id), payload.name, business.country)
-        except Exception:
-            pass
+    if payload.name and business.entity_type == "business":
+        background_tasks.add_task(
+            _run_registry_verification, str(business.id), payload.name, business.country
+        )
 
     return business
 

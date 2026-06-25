@@ -18,6 +18,7 @@ class Settings(BaseSettings):
 
     anthropic_api_key: str = ""
     openai_api_key: str = ""
+    resend_api_key: str = ""  # https://resend.com — free tier 3k emails/month
 
     ukraine_edr_api_url: str = "https://usr.minjust.gov.ua/api"
     germany_hr_api_url: str = "https://www.handelsregister.de/rp_web/search"
@@ -26,6 +27,12 @@ class Settings(BaseSettings):
     opencorporates_api_key: str = ""
 
     pi_camera_root_ca_pem: str = ""
+
+    # C2PA signing — P-256 ECDSA key + certificate chain
+    # Set from .env; fallback to certs/ files if env vars are empty
+    c2pa_signing_key_pem: str = ""
+    c2pa_signing_cert_pem: str = ""
+    c2pa_root_ca_pem: str = ""
 
     cors_origins: list[str] = [
         "http://localhost:3000",

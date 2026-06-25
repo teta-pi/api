@@ -1,14 +1,17 @@
+import logging
 import secrets
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import create_access_token, hash_password, verify_password
+from app.core.config import settings
 from app.core.database import get_db
 from app.models.user import User
 from app.schemas.user import LoginRequest, MagicLinkRequest, Token, UserCreate, UserOut
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
@@ -41,14 +44,56 @@ async def login(payload: LoginRequest, db: AsyncSession = Depends(get_db)) -> di
     return {"access_token": create_access_token(str(user.id)), "token_type": "bearer"}
 
 
+async def _send_magic_link_email(email: str, token: str) -> None:
+    """
+    Send magic link via email provider.
+    Currently supports: Resend (RESEND_API_KEY in .env).
+    Falls back to logging if not configured.
+    """
+    magic_url = f"https://app.tetapi.dev/auth/magic?token={token}"
+    api_key = getattr(settings, "resend_api_key", "")
+
+    if api_key:
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(
+                    "https://api.resend.com/emails",
+                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                    json={
+                        "from": "TETA+PI <noreply@tetapi.dev>",
+                        "to": [email],
+                        "subject": "Your TETA+PI verification link",
+                        "html": f"""
+                        <p>Click below to verify your identity on TETA+PI:</p>
+                        <p><a href="{magic_url}" style="background:#6B3FA0;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600;">
+                          Verify my identity →
+                        </a></p>
+                        <p style="color:#999;font-size:12px;">This link expires in 15 minutes.
+                        If you didn't request this, ignore it.</p>
+                        """,
+                    },
+                )
+                resp.raise_for_status()
+                logger.info("Magic link sent to %s via Resend", email)
+        except Exception as e:
+            logger.error("Failed to send magic link email to %s: %s", email, e)
+    else:
+        # No email provider configured — log for dev access
+        logger.info("MAGIC LINK (no email provider): %s → %s", email, magic_url)
+
+
 @router.post("/magic-link")
 async def request_magic_link(
-    payload: MagicLinkRequest, db: AsyncSession = Depends(get_db)
+    payload: MagicLinkRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
     """
-    Send a magic link (passwordless email login).
-    In production: generate a signed token, send via email provider (SendGrid/Resend).
-    For Sprint 1: return the token directly (development only).
+    Passwordless email login.
+    - Creates user if not exists.
+    - Sends magic link via Resend (if RESEND_API_KEY configured) or logs URL.
+    - Returns dev_token only when environment == "development".
     """
     result = await db.execute(select(User).where(User.email == payload.email))
     user = result.scalar_one_or_none()
@@ -57,12 +102,16 @@ async def request_magic_link(
         user = User(email=payload.email, auth_provider="magic_link")
         db.add(user)
         await db.flush()
+        await db.refresh(user)
 
     token = create_access_token(str(user.id))
-    # TODO: send email with magic link instead of returning token
+
+    background_tasks.add_task(_send_magic_link_email, payload.email, token)
+
+    is_dev = settings.environment == "development"
     return {
-        "message": "Magic link sent",
-        "dev_token": token if True else None,  # Remove in production
+        "message": "Verification email sent — check your inbox.",
+        "dev_token": token if is_dev else None,
     }
 
 
