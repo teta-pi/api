@@ -4,6 +4,8 @@ import secrets
 import uuid
 from datetime import datetime, timezone
 
+from sqlalchemy.exc import IntegrityError
+
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -284,6 +286,7 @@ async def register_device(
     if device:
         device.device_public_key = payload.device_public_key
         device.is_active = True
+        await db.flush()
     else:
         api_key = f"pk_live_{secrets.token_urlsafe(32)}"
         device = Device(
@@ -294,8 +297,15 @@ async def register_device(
             api_key=api_key,
         )
         db.add(device)
-
-    await db.flush()
+        try:
+            await db.flush()
+        except IntegrityError:
+            # Race condition: another request inserted same fingerprint first
+            await db.rollback()
+            result2 = await db.execute(
+                select(Device).where(Device.device_fingerprint == payload.device_fingerprint)
+            )
+            device = result2.scalar_one()
 
     # One-time token — consume it
     await redis.delete(f"cam_reg:{payload.registration_token}")
