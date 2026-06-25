@@ -73,9 +73,12 @@ async def create_business(
     db.add(business)
     await db.flush()
 
-    # Trigger async registry verification
-    from app.workers.tasks.verification import verify_registry_task
-    verify_registry_task.delay(str(business.id), payload.name, payload.country)
+    # Trigger async registry verification (Celery optional — no worker on small server)
+    try:
+        from app.workers.tasks.verification import verify_registry_task
+        verify_registry_task.delay(str(business.id), payload.name, payload.country)
+    except Exception:
+        pass
 
     return business
 
@@ -161,8 +164,11 @@ async def update_business(
     await db.flush()
 
     if payload.name:
-        from app.workers.tasks.verification import verify_registry_task
-        verify_registry_task.delay(str(business.id), payload.name, business.country)
+        try:
+            from app.workers.tasks.verification import verify_registry_task
+            verify_registry_task.delay(str(business.id), payload.name, business.country)
+        except Exception:
+            pass
 
     return business
 

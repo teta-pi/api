@@ -27,7 +27,13 @@ class Settings(BaseSettings):
 
     pi_camera_root_ca_pem: str = ""
 
-    cors_origins: list[str] = ["http://localhost:3000", "http://localhost:3001"]
+    cors_origins: list[str] = [
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "https://tetapi.dev",
+        "https://app.tetapi.dev",
+        "https://api.tetapi.dev",
+    ]
 
 
 settings = Settings()
