@@ -48,7 +48,6 @@ async def search_businesses(
         select(Business)
         .where(Business.is_published == True)  # noqa: E712
         .where(Business.is_public == True)  # noqa: E712
-        .where(Business.verification_level != "none")
         .options(selectinload(Business.blocks).selectinload(Block.media))
     )
 

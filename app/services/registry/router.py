@@ -6,15 +6,19 @@ from app.services.registry.germany_hr import GermanyHandelsregisterVerifier
 from app.services.registry.companies_house import UKCompaniesHouseVerifier
 from app.services.registry.gleif import GLEIFVerifier
 from app.services.registry.us_sec import USSecVerifier
+from app.services.registry.opencorporates import OpenCorporatesVerifier
+from app.services.registry.norway_brreg import NorwayBrregVerifier
 
-_VERIFIERS_BY_COUNTRY = {
+_VERIFIERS_BY_COUNTRY: dict[str, object] = {
     "UA": UkraineEDRVerifier(),
     "DE": GermanyHandelsregisterVerifier(),
     "GB": UKCompaniesHouseVerifier(),
     "US": USSecVerifier(),
+    "NO": NorwayBrregVerifier(),
 }
 
 _GLEIF = GLEIFVerifier()
+_OPENCORPORATES = OpenCorporatesVerifier()
 
 
 async def verify_business_in_registry(
@@ -23,23 +27,31 @@ async def verify_business_in_registry(
 ) -> list[RegistryResult]:
     """
     Search registries for a company name.
-    Strategy:
-    - Country-specific verifier (UA/DE/GB/US) when country is given.
-    - GLEIF always runs (global open registry, covers EU + US + more).
-    - Merge and deduplicate by registration number / legal name.
-    """
-    tasks = []
-    country_upper = country.upper() if country else None
 
+    Strategy (in order):
+    1. Country-specific verifier when country is known (UA/DE/GB/US/NO).
+    2. GLEIF — global LEI registry, covers multinational entities.
+    3. OpenCorporates — 200+ jurisdictions fallback (FR/NL/ES/IT/PL/CA/AU/SG/…).
+    4. US SEC EDGAR — US-specific public company data (no country or US).
+
+    Results are merged and deduplicated by registration number / legal name.
+    """
+    country_upper = country.upper() if country else None
+    tasks = []
+
+    # 1. Country-specific verifier
     if country_upper and country_upper in _VERIFIERS_BY_COUNTRY:
         tasks.append(_VERIFIERS_BY_COUNTRY[country_upper].search(company_name))
 
+    # 2. GLEIF (always)
     tasks.append(_GLEIF.search(company_name, country=country))
 
-    # If no country or non-specific country, also search US SEC
-    if not country_upper or country_upper == "US":
-        if not (country_upper == "US"):  # avoid double US search
-            tasks.append(_VERIFIERS_BY_COUNTRY["US"].search(company_name))
+    # 3. OpenCorporates — always as global fallback, with jurisdiction hint
+    tasks.append(_OPENCORPORATES.search(company_name, country=country))
+
+    # 4. SEC EDGAR for US or unknown country (avoids duplicate when US verifier already ran)
+    if not country_upper or country_upper not in _VERIFIERS_BY_COUNTRY:
+        tasks.append(_VERIFIERS_BY_COUNTRY["US"].search(company_name))
 
     all_batches = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -57,12 +69,14 @@ async def verify_business_in_registry(
                 seen.add(key)
                 merged.append(r)
 
+    # Prefer country-specific matches, then GLEIF, then OpenCorporates, then SEC
+    _PRIORITY = {"Handelsregister": 0, "EDR": 0, "Companies House": 0,
+                 "Brønnøysundregistrene": 0, "SEC EDGAR": 1, "GLEIF": 2}
+
     def _sort_key(r: RegistryResult) -> int:
-        if country_upper and r.registry not in ("GLEIF", "SEC EDGAR"):
+        if country_upper and not r.registry.startswith("GLEIF") and not r.registry.startswith("OpenCorporates") and r.registry != "SEC EDGAR":
             return 0
-        if r.registry == "GLEIF":
-            return 1
-        return 2
+        return _PRIORITY.get(r.registry, 3)
 
     merged.sort(key=_sort_key)
     return merged
