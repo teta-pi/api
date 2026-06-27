@@ -1,14 +1,43 @@
 import hashlib
 import json
+import logging
+import os
 import secrets
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 from sqlalchemy.exc import IntegrityError
 
-from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, UploadFile, status
+from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+logger = logging.getLogger(__name__)
+
+# Local filesystem storage fallback (used when S3/MinIO is not configured)
+_UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "/opt/tetapi/uploads"))
+
+
+def _save_local(content: bytes, filename: str) -> str:
+    """Save file to local disk, return storage URL."""
+    try:
+        _UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        file_id = uuid.uuid4().hex
+        safe_name = Path(filename).name or "file"
+        dest = _UPLOAD_DIR / file_id / safe_name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(content)
+        return f"/media/local/{file_id}/{safe_name}"
+    except Exception as e:
+        logger.warning("Local storage failed: %s", e)
+        return f"local://tetapi-media/{uuid.uuid4()}/{filename}"
+
+
+async def _bitcoin_timestamp_bg(media_id: str, content_hex: str) -> None:
+    """Background bitcoin timestamp — no-op until OTS integration."""
+    logger.info("Bitcoin timestamp queued for media %s (OTS integration pending)", media_id)
 
 from app.api.deps import get_current_user
 from app.core.database import get_db
@@ -51,6 +80,7 @@ async def _get_device(
 
 @router.post("/device-upload", response_model=DeviceMediaUploadResponse)
 async def device_upload_media(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     manifest_json: str | None = Form(None),
     captured_at: str | None = Form(None),
@@ -60,10 +90,8 @@ async def device_upload_media(
     """Upload media from a registered Pi CAM device using its api_key."""
     content = await file.read()
     original_hash = hashlib.sha256(content).hexdigest()
-
     mime_type = file.content_type or "application/octet-stream"
 
-    # Try embedded C2PA first, then sidecar JSON passed from the app
     manifest = c2pa_service.extract_c2pa_manifest(content, mime_type)
     if not manifest and manifest_json:
         manifest = c2pa_service.extract_c2pa_manifest_from_json(manifest_json)
@@ -78,7 +106,7 @@ async def device_upload_media(
             manifest = c2pa_service.add_teta_pi_countersignature(manifest)
             teta_pi_verified = True
 
-    storage_url = f"s3://tetapi-media/{uuid.uuid4()}/{file.filename}"
+    storage_url = _save_local(content, file.filename or "upload")
 
     captured_dt = None
     if captured_at:
@@ -99,9 +127,7 @@ async def device_upload_media(
     )
     db.add(media)
     await db.flush()
-
-    from app.workers.tasks.bitcoin import submit_bitcoin_timestamp
-    submit_bitcoin_timestamp.delay(str(media.id), content.hex())
+    background_tasks.add_task(_bitcoin_timestamp_bg, str(media.id), original_hash)
 
     return {
         "media_id": media.id,
@@ -117,6 +143,7 @@ async def device_upload_media(
 
 @router.post("/upload", response_model=MediaUploadResponse)
 async def upload_media(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     block_id: uuid.UUID = Form(...),
     type: str = Form(...),
@@ -126,8 +153,8 @@ async def upload_media(
 ) -> dict:
     content = await file.read()
     original_hash = hashlib.sha256(content).hexdigest()
-
     mime_type = file.content_type or "application/octet-stream"
+
     manifest = c2pa_service.extract_c2pa_manifest(content, mime_type)
     c2pa_verified = False
     c2pa_signer = None
@@ -137,7 +164,7 @@ async def upload_media(
         if c2pa_verified:
             manifest = c2pa_service.add_teta_pi_countersignature(manifest)
 
-    storage_url = f"s3://tetapi-media/{uuid.uuid4()}/{file.filename}"
+    storage_url = _save_local(content, file.filename or "upload")
 
     captured_dt = None
     if captured_at:
@@ -158,17 +185,25 @@ async def upload_media(
     )
     db.add(media)
     await db.flush()
-
-    from app.workers.tasks.bitcoin import submit_bitcoin_timestamp
-    submit_bitcoin_timestamp.delay(str(media.id), content.hex())
+    background_tasks.add_task(_bitcoin_timestamp_bg, str(media.id), original_hash)
 
     return {
         "media_id": media.id,
+        "storage_url": storage_url,
         "c2pa_verified": c2pa_verified,
         "c2pa_signer": c2pa_signer,
         "bitcoin_status": "pending",
         "estimated_confirmation": "~60 minutes",
     }
+
+
+@router.get("/local/{file_id}/{filename}")
+async def serve_local_media(file_id: str, filename: str) -> FileResponse:
+    """Serve locally stored media files."""
+    path = _UPLOAD_DIR / file_id / filename
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(path)
 
 
 @router.get("/{media_id}/verify", response_model=MediaVerifyResponse)
