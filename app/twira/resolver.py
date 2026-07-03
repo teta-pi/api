@@ -47,6 +47,9 @@ async def twira_resolve(
     except Exception:
         logger.exception("Embedding generation failed — TWIRA resolve unavailable")
         return []
+    if not query_emb:
+        # No embedding provider configured — caller falls back to keyword resolver
+        return []
 
     candidate_rows = (await db.execute(_CANDIDATES_SQL, {"query_emb": str(query_emb)})).all()
     candidate_ids = [row.business_id for row in candidate_rows]
