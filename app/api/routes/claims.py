@@ -1,7 +1,7 @@
 import time
 from collections import defaultdict
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.models.claim import Claim
 from app.schemas.claim import ClaimCreate, ClaimResponse, ClaimStats
+from app.services.email import send_claim_confirmation
 
 router = APIRouter(prefix="/claim", tags=["claims"])
 
@@ -34,6 +35,7 @@ async def create_claim(
     payload: ClaimCreate,
     request: Request,
     response: Response,
+    background: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ) -> ClaimResponse:
     _rate_limit(request)
@@ -64,6 +66,7 @@ async def create_claim(
         return ClaimResponse(position=claim.position)
 
     await db.refresh(claim)
+    background.add_task(send_claim_confirmation, email, claim.position, claim.ready_to_pay)
     return ClaimResponse(position=claim.position)
 
 
