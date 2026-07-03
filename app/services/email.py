@@ -42,6 +42,51 @@ FOUNDING_BLOCK_HTML = """\
 """
 
 
+VERIFICATION_CODE_HTML = """\
+<div style="font-family:'Segoe UI',system-ui,sans-serif;max-width:520px;margin:0 auto;padding:32px 24px;color:#1A1035">
+  <div style="font-size:26px;font-weight:700;margin-bottom:4px">
+    <span style="color:#5B45C9">&Theta;</span><span style="font-weight:300">+</span><span style="color:#F59A2E">&pi;</span>
+  </div>
+  <h1 style="font-size:22px;font-weight:700;margin:24px 0 8px">Your verification code</h1>
+  <p style="font-size:15px;line-height:1.6;color:#4A3F6B;margin:0 0 24px">
+    Enter this code on TETA+PI to verify your email:
+  </p>
+  <div style="background:#F4F0FB;border:1px solid #E2DCF0;border-radius:12px;padding:20px;text-align:center;margin:0 0 24px">
+    <span style="font-family:ui-monospace,'SF Mono','Menlo',monospace;font-size:34px;font-weight:700;letter-spacing:10px;color:#5B45C9">{code}</span>
+  </div>
+  <p style="font-size:13px;line-height:1.6;color:#9088B0;margin:0">
+    The code expires in 15 minutes. If you didn't request it, ignore this email.
+  </p>
+  <p style="font-size:13px;line-height:1.6;color:#9088B0;margin:28px 0 0">
+    TetaPi GmbH · Frankfurt am Main · <a href="https://tetapi.dev" style="color:#5B45C9">tetapi.dev</a>
+  </p>
+</div>
+"""
+
+
+async def send_verification_code(email: str, code: str) -> None:
+    """Send a 6-digit email verification code via Resend. Failures logged, never raised."""
+    if not settings.resend_api_key:
+        logger.info("RESEND_API_KEY not set — verification code for %s: %s", email, code)
+        return
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                RESEND_API_URL,
+                headers={"Authorization": f"Bearer {settings.resend_api_key}"},
+                json={
+                    "from": FROM_ADDRESS,
+                    "to": [email],
+                    "subject": f"{code} — your TETA+PI verification code",
+                    "html": VERIFICATION_CODE_HTML.format(code=code),
+                },
+            )
+            if resp.status_code >= 400:
+                logger.error("Resend error %s for %s: %s", resp.status_code, email, resp.text)
+    except httpx.HTTPError:
+        logger.exception("Failed to send verification code to %s", email)
+
+
 async def send_claim_confirmation(email: str, position: int, ready_to_pay: bool) -> None:
     """Send waitlist confirmation via Resend. Failures are logged, never raised."""
     if not settings.resend_api_key:

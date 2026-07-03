@@ -1,7 +1,9 @@
 import logging
 import secrets
 
+import redis.asyncio as aioredis
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from pydantic import BaseModel, EmailStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -10,9 +12,15 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.models.user import User
 from app.schemas.user import LoginRequest, MagicLinkRequest, Token, UserCreate, UserOut
+from app.services.email import send_verification_code
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+_redis = aioredis.from_url(settings.redis_url, decode_responses=True)
+
+_CODE_TTL = 900  # 15 minutes
+_MAX_ATTEMPTS = 5
 
 
 @router.post("/register", response_model=UserOut, status_code=status.HTTP_201_CREATED)
@@ -113,6 +121,68 @@ async def request_magic_link(
         "message": "Verification email sent — check your inbox.",
         "dev_token": token if is_dev else None,
     }
+
+
+class EmailCodeRequest(BaseModel):
+    email: EmailStr
+
+
+class VerifyCodeRequest(BaseModel):
+    email: EmailStr
+    code: str
+
+
+@router.post("/email-code")
+async def request_email_code(
+    payload: EmailCodeRequest,
+    background_tasks: BackgroundTasks,
+) -> dict:
+    """Send a 6-digit verification code to the email. Code lives 15 min in Redis."""
+    email = payload.email.lower().strip()
+
+    # Max 1 send per 60s per email
+    if await _redis.exists(f"email_code_cooldown:{email}"):
+        raise HTTPException(status_code=429, detail="Code already sent — wait a minute before retrying")
+
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    await _redis.setex(f"email_code:{email}", _CODE_TTL, code)
+    await _redis.setex(f"email_code_cooldown:{email}", 60, "1")
+    await _redis.delete(f"email_code_attempts:{email}")
+
+    background_tasks.add_task(send_verification_code, email, code)
+    return {"message": "Verification code sent — check your inbox."}
+
+
+@router.post("/verify-code", response_model=Token)
+async def verify_email_code(
+    payload: VerifyCodeRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Check the 6-digit code; on success create the user (if new) and return a token."""
+    email = payload.email.lower().strip()
+
+    attempts = await _redis.incr(f"email_code_attempts:{email}")
+    if attempts == 1:
+        await _redis.expire(f"email_code_attempts:{email}", _CODE_TTL)
+    if attempts > _MAX_ATTEMPTS:
+        await _redis.delete(f"email_code:{email}")
+        raise HTTPException(status_code=429, detail="Too many attempts — request a new code")
+
+    stored = await _redis.get(f"email_code:{email}")
+    if not stored or not secrets.compare_digest(stored, payload.code.strip()):
+        raise HTTPException(status_code=400, detail="Invalid or expired code")
+
+    await _redis.delete(f"email_code:{email}", f"email_code_attempts:{email}")
+
+    result = await db.execute(select(User).where(User.email == email))
+    user = result.scalar_one_or_none()
+    if not user:
+        user = User(email=email, auth_provider="email_code")
+        db.add(user)
+        await db.flush()
+        await db.refresh(user)
+
+    return {"access_token": create_access_token(str(user.id)), "token_type": "bearer"}
 
 
 @router.post("/agent-key", response_model=Token)
