@@ -10,9 +10,26 @@ from app.core.database import Base
 
 
 class EntityType(str, enum.Enum):
-    business = "business"
+    """Full digital-entity set (SystemSpec v2.1 §01)."""
+
     person = "person"
+    business = "business"
     organization = "organization"
+    brand = "brand"
+    domain = "domain"
+    website = "website"
+    api = "api"
+    ai_model = "ai_model"
+    mcp_server = "mcp_server"
+    software = "software"
+    repository = "repository"
+    ai_agent = "ai_agent"
+
+
+class Segment(str, enum.Enum):
+    builder = "builder"
+    operator = "operator"
+    consumer = "consumer"
 
 
 class Business(Base):
@@ -23,6 +40,11 @@ class Business(Base):
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
     )
     entity_type: Mapped[str] = mapped_column(String(50), default="business")
+    segment: Mapped[str] = mapped_column(String(20), default="operator")  # builder | operator | consumer
+
+    # TWIRA precomputed components (SystemSpec v2.1 §03)
+    t_score: Mapped[float] = mapped_column(default=0.0)
+    p_score: Mapped[float] = mapped_column(default=0.0)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     slug: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
