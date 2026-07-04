@@ -2,7 +2,7 @@ import logging
 import secrets
 
 import redis.asyncio as aioredis
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, status
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -323,6 +323,40 @@ async def generate_personal_api_key(
     user.api_key = api_key
     await db.commit()
     return {"api_key": api_key, "note": "Shown once. Rotating invalidates the previous key."}
+
+
+@router.post("/avatar")
+async def upload_avatar(
+    file: UploadFile,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict:
+    """Upload an account avatar (PNG/JPEG/WebP, max 2 MB)."""
+    if file.content_type not in ("image/png", "image/jpeg", "image/webp"):
+        raise HTTPException(status_code=400, detail="Only PNG, JPEG or WebP allowed")
+    content = await file.read()
+    if len(content) > 2 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Max 2 MB")
+
+    from app.api.routes.media import _save_local
+
+    ext = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}[file.content_type]
+    user.avatar_url = _save_local(content, f"avatar.{ext}")
+    await db.commit()
+    return {"avatar_url": user.avatar_url}
+
+
+@router.get("/me")
+async def get_me(user: User = Depends(get_current_user)) -> dict:
+    return {
+        "id": str(user.id),
+        "email": user.email,
+        "full_name": user.full_name,
+        "role": user.role,
+        "avatar_url": user.avatar_url,
+        "has_password": user.hashed_password is not None,
+        "has_api_key": user.api_key is not None,
+    }
 
 
 @router.post("/agent-key", response_model=Token)
