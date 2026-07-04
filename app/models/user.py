@@ -18,6 +18,7 @@ class User(Base):
     full_name: Mapped[str | None] = mapped_column(EncryptedString, nullable=True)  # PII, encrypted at rest
     auth_provider: Mapped[str] = mapped_column(String(50), default="email")
     role: Mapped[str] = mapped_column(String(20), default="user")  # user | support | admin
+    token_version: Mapped[int] = mapped_column(default=0)  # bumped by "log out everywhere"
     is_active: Mapped[bool] = mapped_column(default=True)
     is_agent: Mapped[bool] = mapped_column(default=False)
     api_key: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True)

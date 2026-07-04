@@ -19,11 +19,16 @@ def hash_password(plain: str) -> str:
     return pwd_context.hash(plain)
 
 
-def create_access_token(subject: str | Any, expires_delta: timedelta | None = None) -> str:
+def create_access_token(
+    subject: str | Any,
+    expires_delta: timedelta | None = None,
+    token_version: int = 0,
+) -> str:
     expire = datetime.now(timezone.utc) + (
         expires_delta or timedelta(minutes=settings.access_token_expire_minutes)
     )
-    payload = {"sub": str(subject), "exp": expire}
+    # "ver" claim lets "log out everywhere" invalidate previously issued tokens
+    payload = {"sub": str(subject), "exp": expire, "ver": token_version}
     return jwt.encode(payload, settings.secret_key, algorithm=ALGORITHM)
 
 

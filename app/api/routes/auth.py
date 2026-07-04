@@ -50,7 +50,7 @@ async def login(payload: LoginRequest, db: AsyncSession = Depends(get_db)) -> di
     ):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    return {"access_token": create_access_token(str(user.id)), "token_type": "bearer"}
+    return {"access_token": create_access_token(str(user.id), token_version=user.token_version), "token_type": "bearer"}
 
 
 async def _send_magic_link_email(email: str, token: str) -> None:
@@ -113,7 +113,7 @@ async def request_magic_link(
         await db.flush()
         await db.refresh(user)
 
-    token = create_access_token(str(user.id))
+    token = create_access_token(str(user.id), token_version=user.token_version)
 
     background_tasks.add_task(_send_magic_link_email, payload.email, token)
 
@@ -183,7 +183,7 @@ async def verify_email_code(
         await db.flush()
         await db.refresh(user)
 
-    return {"access_token": create_access_token(str(user.id)), "token_type": "bearer"}
+    return {"access_token": create_access_token(str(user.id), token_version=user.token_version), "token_type": "bearer"}
 
 
 class SetPasswordRequest(BaseModel):
@@ -202,6 +202,127 @@ async def set_password(
     user.hashed_password = hash_password(payload.password)
     await db.commit()
     return {"message": "Password set — you can now sign in with email + password."}
+
+
+class ChangeEmailRequest(BaseModel):
+    new_email: EmailStr
+
+
+class ConfirmEmailChangeRequest(BaseModel):
+    new_email: EmailStr
+    code: str
+
+
+@router.post("/change-email")
+async def request_email_change(
+    payload: ChangeEmailRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict:
+    """Step 1: send a verification code to the NEW address."""
+    new_email = payload.new_email.lower().strip()
+    existing = await db.execute(select(User).where(User.email == new_email))
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="This email is already in use")
+
+    if await _redis.exists(f"email_code_cooldown:{new_email}"):
+        raise HTTPException(status_code=429, detail="Code already sent — wait a minute")
+
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    await _redis.setex(f"email_code:{new_email}", _CODE_TTL, code)
+    await _redis.setex(f"email_code_cooldown:{new_email}", 60, "1")
+    # Bind the pending change to this user so nobody else can claim the code
+    await _redis.setex(f"email_change_owner:{new_email}", _CODE_TTL, str(user.id))
+
+    background_tasks.add_task(send_verification_code, new_email, code)
+    return {"message": "Verification code sent to the new address."}
+
+
+@router.post("/confirm-email-change")
+async def confirm_email_change(
+    payload: ConfirmEmailChangeRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict:
+    """Step 2: verify the code and switch the account email."""
+    new_email = payload.new_email.lower().strip()
+
+    owner = await _redis.get(f"email_change_owner:{new_email}")
+    if owner != str(user.id):
+        raise HTTPException(status_code=400, detail="No pending email change for this address")
+
+    stored = await _redis.get(f"email_code:{new_email}")
+    if not stored or not secrets.compare_digest(stored, payload.code.strip()):
+        raise HTTPException(status_code=400, detail="Invalid or expired code")
+
+    await _redis.delete(f"email_code:{new_email}", f"email_change_owner:{new_email}")
+    user.email = new_email
+    await db.commit()
+    return {"message": "Email updated.", "email": new_email}
+
+
+@router.post("/logout-all", response_model=Token)
+async def logout_everywhere(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict:
+    """Invalidate every issued token; returns a fresh one for this session."""
+    user.token_version += 1
+    await db.commit()
+    return {
+        "access_token": create_access_token(str(user.id), token_version=user.token_version),
+        "token_type": "bearer",
+    }
+
+
+@router.post("/delete-account")
+async def delete_own_account(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict:
+    """GDPR self-service erasure: wipe PII, deactivate, unpublish entities.
+    Bitcoin-anchored verification events remain (documented in privacy policy)."""
+    if user.role == "admin":
+        raise HTTPException(status_code=400, detail="Admin accounts cannot self-delete")
+
+    from app.models.business import Business
+    from app.models.claim import Claim
+
+    old_email = user.email
+    user.email = f"deleted-{user.id.hex[:12]}@anon.tetapi.dev"
+    user.full_name = None
+    user.hashed_password = None
+    user.api_key = None
+    user.is_active = False
+    user.token_version += 1  # kill all sessions
+
+    claims = (await db.execute(select(Claim).where(Claim.email == old_email))).scalars().all()
+    for c in claims:
+        c.email = user.email
+        c.source = None
+
+    entities = (
+        await db.execute(select(Business).where(Business.owner_id == user.id))
+    ).scalars().all()
+    for e in entities:
+        e.is_published = False
+        e.is_public = False
+
+    await db.commit()
+    return {"status": "deleted"}
+
+
+@router.post("/personal-api-key")
+async def generate_personal_api_key(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict:
+    """Generate (or rotate) a personal API key. Shown once — store it safely."""
+    api_key = f"pk_live_{secrets.token_urlsafe(32)}"
+    user.api_key = api_key
+    await db.commit()
+    return {"api_key": api_key, "note": "Shown once. Rotating invalidates the previous key."}
 
 
 @router.post("/agent-key", response_model=Token)
