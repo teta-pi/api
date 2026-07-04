@@ -326,6 +326,225 @@ async def list_entities(
     }
 
 
+# ── GDPR: export + anonymize (A3) ─────────────────────────────────────────────
+
+
+@router.get("/users/{user_id}/export")
+async def export_user(
+    user_id: uuid.UUID,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """GDPR Art. 20 — full machine-readable export of everything we hold."""
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    entities = (
+        await db.execute(select(Business).where(Business.owner_id == user_id))
+    ).scalars().all()
+    entity_ids = [e.id for e in entities]
+    events = []
+    if entity_ids:
+        events = (
+            await db.execute(
+                select(VerificationEvent).where(VerificationEvent.entity_id.in_(entity_ids))
+            )
+        ).scalars().all()
+    claims = (
+        await db.execute(select(Claim).where(Claim.email == user.email))
+    ).scalars().all()
+
+    await _audit(db, admin, "users.export", target_type="user", target_id=str(user_id))
+    return {
+        "exported_at": datetime.utcnow().isoformat() + "Z",
+        "user": {
+            "id": str(user.id),
+            "email": user.email,
+            "full_name": user.full_name,
+            "auth_provider": user.auth_provider,
+            "role": user.role,
+            "is_active": user.is_active,
+            "created_at": user.created_at.isoformat(),
+        },
+        "entities": [
+            {
+                "id": str(e.id), "name": e.name, "slug": e.slug,
+                "entity_type": e.entity_type, "verification_level": e.verification_level,
+                "registry_id": e.registry_id, "registry_status": e.registry_status,
+                "registry_data": e.registry_data, "country": e.country,
+                "created_at": e.created_at.isoformat(),
+            }
+            for e in entities
+        ],
+        "verification_events": [
+            {
+                "id": str(ev.id), "entity_id": str(ev.entity_id),
+                "event_type": ev.event_type, "level": ev.level, "source": ev.source,
+                "ots_status": ev.ots_status, "btc_block": ev.btc_block,
+                "created_at": ev.created_at.isoformat(),
+            }
+            for ev in events
+        ],
+        "claims": [
+            {
+                "position": c.position, "entity_type": c.entity_type,
+                "ready_to_pay": c.ready_to_pay, "created_at": c.created_at.isoformat(),
+            }
+            for c in claims
+        ],
+    }
+
+
+@router.post("/users/{user_id}/anonymize")
+async def anonymize_user(
+    user_id: uuid.UUID,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """GDPR Art. 17 — right to erasure. PII is wiped; verification_events
+    stay (append-only, Bitcoin-anchored — documented in the privacy policy)."""
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user.role == "admin":
+        raise HTTPException(status_code=400, detail="Cannot anonymize an admin account")
+
+    old_email = user.email
+    user.email = f"deleted-{user.id.hex[:12]}@anon.tetapi.dev"
+    user.full_name = None
+    user.hashed_password = None
+    user.api_key = None
+    user.is_active = False
+
+    # Wipe waitlist claims tied to that email
+    claims = (await db.execute(select(Claim).where(Claim.email == old_email))).scalars().all()
+    for c in claims:
+        c.email = user.email
+        c.source = None
+
+    # Unpublish their entities
+    entities = (
+        await db.execute(select(Business).where(Business.owner_id == user_id))
+    ).scalars().all()
+    for e in entities:
+        e.is_published = False
+        e.is_public = False
+
+    await db.commit()
+    await _audit(
+        db, admin, "users.anonymize", target_type="user", target_id=str(user_id),
+        detail={"entities_unpublished": len(entities), "claims_wiped": len(claims)},
+    )
+    return {"status": "anonymized", "user_id": str(user_id)}
+
+
+# ── Registry validation (A5) ──────────────────────────────────────────────────
+
+# Common disposable-email domains flagged at review time
+DISPOSABLE_DOMAINS = {
+    "mailinator.com", "guerrillamail.com", "10minutemail.com", "tempmail.com",
+    "temp-mail.org", "throwaway.email", "yopmail.com", "sharklasers.com",
+    "getnada.com", "trashmail.com", "fakeinbox.com", "dispostable.com",
+}
+
+
+@router.get("/users/{user_id}/flags")
+async def user_flags(
+    user_id: uuid.UUID,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Automatic suspicion flags for a registration."""
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    flags: list[str] = []
+    domain = user.email.rsplit("@", 1)[-1].lower()
+    if domain in DISPOSABLE_DOMAINS:
+        flags.append("disposable_email")
+
+    entities = (
+        await db.execute(select(Business).where(Business.owner_id == user_id))
+    ).scalars().all()
+    for e in entities:
+        if e.registry_id:
+            dup = (
+                await db.execute(
+                    select(func.count(Business.id)).where(
+                        Business.registry_id == e.registry_id, Business.id != e.id
+                    )
+                )
+            ).scalar_one()
+            if dup:
+                flags.append(f"duplicate_registry_id:{e.registry_id}")
+        reg_country = (e.registry_data or {}).get("country")
+        if reg_country and e.country and reg_country.upper() != e.country.upper():
+            flags.append(f"country_mismatch:{e.slug}")
+
+    return {"user_id": str(user_id), "flags": flags}
+
+
+@router.post("/entities/{entity_id}/validate")
+async def validate_entity(
+    entity_id: uuid.UUID,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Re-check the entity against official registries; result is recorded
+    as an append-only verification_event."""
+    import hashlib
+    import json
+
+    from app.services.registry import verify_business_in_registry
+
+    entity = (
+        await db.execute(select(Business).where(Business.id == entity_id))
+    ).scalar_one_or_none()
+    if not entity:
+        raise HTTPException(status_code=404, detail="Entity not found")
+
+    results = await verify_business_in_registry(entity.name, entity.country)
+    found = [r for r in results if r.found]
+
+    status = "confirmed" if found else "not_found"
+    payload = {
+        "entity_id": str(entity_id),
+        "checked_at": datetime.utcnow().isoformat(),
+        "status": status,
+        "matches": len(found),
+    }
+
+    if found:
+        entity.registry_status = "verified"
+        best = found[0]
+        entity.registry_data = {
+            **(entity.registry_data or {}),
+            "revalidated_at": payload["checked_at"],
+            "registry": getattr(best, "registry", None),
+            "legal_name": getattr(best, "legal_name", None),
+        }
+    else:
+        entity.registry_status = "not_found"
+
+    db.add(
+        VerificationEvent(
+            entity_id=entity_id,
+            event_type="reverified",
+            level=1,
+            source="official_registry",
+            payload_hash=hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).digest(),
+        )
+    )
+    await db.commit()
+    await _audit(
+        db, admin, "entities.validate", target_type="entity", target_id=str(entity_id),
+        detail=payload,
+    )
+    return payload
+
+
 # ── Audit log (read-only view for admins) ─────────────────────────────────────
 
 

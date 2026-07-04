@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     openai_api_key: str = ""
     resend_api_key: str = ""  # https://resend.com — free tier 3k emails/month
+    pii_encryption_key: str = ""  # Fernet key for at-rest PII encryption (server .env only)
 
     ukraine_edr_api_url: str = "https://usr.minjust.gov.ua/api"
     germany_hr_api_url: str = "https://www.handelsregister.de/rp_web/search"
