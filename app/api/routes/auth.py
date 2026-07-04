@@ -12,6 +12,7 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.models.user import User
 from app.schemas.user import LoginRequest, MagicLinkRequest, Token, UserCreate, UserOut
+from app.api.deps import get_current_user
 from app.services.email import send_verification_code
 
 logger = logging.getLogger(__name__)
@@ -183,6 +184,24 @@ async def verify_email_code(
         await db.refresh(user)
 
     return {"access_token": create_access_token(str(user.id)), "token_type": "bearer"}
+
+
+class SetPasswordRequest(BaseModel):
+    password: str
+
+
+@router.post("/set-password")
+async def set_password(
+    payload: SetPasswordRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict:
+    """Set or change the account password (key login via /auth/token)."""
+    if len(payload.password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    user.hashed_password = hash_password(payload.password)
+    await db.commit()
+    return {"message": "Password set — you can now sign in with email + password."}
 
 
 @router.post("/agent-key", response_model=Token)
