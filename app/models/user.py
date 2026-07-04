@@ -16,6 +16,7 @@ class User(Base):
     hashed_password: Mapped[str | None] = mapped_column(String(255), nullable=True)
     full_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     auth_provider: Mapped[str] = mapped_column(String(50), default="email")
+    role: Mapped[str] = mapped_column(String(20), default="user")  # user | support | admin
     is_active: Mapped[bool] = mapped_column(default=True)
     is_agent: Mapped[bool] = mapped_column(default=False)
     api_key: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True)
