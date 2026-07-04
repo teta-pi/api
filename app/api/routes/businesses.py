@@ -215,6 +215,59 @@ async def update_business(
     return business
 
 
+@router.get("/by-slug/{slug}/public")
+async def public_profile_by_slug(
+    slug: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Public entity page — only published & public entities, public blocks only."""
+    result = await db.execute(
+        select(Business)
+        .where(Business.slug == slug, Business.is_published == True, Business.is_public == True)  # noqa: E712
+        .options(selectinload(Business.blocks).selectinload(Block.media))
+    )
+    business = result.scalar_one_or_none()
+    if not business:
+        raise HTTPException(status_code=404, detail="Entity not found")
+
+    trust_level = _compute_verification_level(business)
+
+    blocks = []
+    for block in sorted(business.blocks, key=lambda b: b.order):
+        if not block.is_public:
+            continue
+        media_list = [
+            {
+                "type": m.type,
+                "c2pa_verified": m.c2pa_verified,
+                "captured_at": m.captured_at.isoformat() if m.captured_at else None,
+                "bitcoin_confirmed": m.bitcoin_confirmed,
+                "bitcoin_block": m.bitcoin_block,
+            }
+            for m in block.media
+        ]
+        blocks.append({"title": block.title, "description": block.description, "media": media_list})
+
+    rd = business.registry_data or {}
+    return {
+        "name": business.name,
+        "slug": business.slug,
+        "entity_type": business.entity_type,
+        "description": business.description,
+        "country": business.country,
+        "trust_level": trust_level,
+        "registry": {
+            "registry": rd.get("registry"),
+            "status": business.registry_status,
+            "registry_id": business.registry_id,
+        },
+        "agent_endpoint": business.agent_endpoint,
+        "agent_endpoint_verified": business.agent_endpoint_verified,
+        "blocks": blocks,
+        "created_at": business.created_at.isoformat(),
+    }
+
+
 @router.get("/{business_id}/preview", response_model=AgentBusinessProfile)
 async def agent_preview(
     business_id: uuid.UUID,
