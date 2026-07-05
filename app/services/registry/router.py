@@ -8,6 +8,11 @@ from app.services.registry.gleif import GLEIFVerifier
 from app.services.registry.us_sec import USSecVerifier
 from app.services.registry.opencorporates import OpenCorporatesVerifier
 from app.services.registry.norway_brreg import NorwayBrregVerifier
+from app.services.registry.france_re import FranceRechercheEntreprisesVerifier
+from app.services.registry.czech_ares import CzechAresVerifier
+from app.services.registry.finland_prh import FinlandPrhVerifier
+from app.services.registry.us_states import USStateRegistriesVerifier
+from app.services.registry.premium import NorthDataVerifier, OpendatabotVerifier
 
 _VERIFIERS_BY_COUNTRY: dict[str, object] = {
     "UA": UkraineEDRVerifier(),
@@ -15,7 +20,15 @@ _VERIFIERS_BY_COUNTRY: dict[str, object] = {
     "GB": UKCompaniesHouseVerifier(),
     "US": USSecVerifier(),
     "NO": NorwayBrregVerifier(),
+    "FR": FranceRechercheEntreprisesVerifier(),
+    "CZ": CzechAresVerifier(),
+    "FI": FinlandPrhVerifier(),
 }
+
+_US_STATES = USStateRegistriesVerifier()
+# Commercial providers — no-ops until their API keys are configured
+_NORTHDATA = NorthDataVerifier()
+_OPENDATABOT = OpendatabotVerifier()
 
 _GLEIF = GLEIFVerifier()
 _OPENCORPORATES = OpenCorporatesVerifier()
@@ -52,6 +65,16 @@ async def verify_business_in_registry(
     # 4. SEC EDGAR for US or unknown country (avoids duplicate when US verifier already ran)
     if not country_upper or country_upper not in _VERIFIERS_BY_COUNTRY:
         tasks.append(_VERIFIERS_BY_COUNTRY["US"].search(company_name))
+
+    # 5. US state registries (NY/CO open data) — SEC only covers public companies
+    if not country_upper or country_upper == "US":
+        tasks.append(_US_STATES.search(company_name))
+
+    # 6. Commercial providers when licensed (deep DE/EU + full UA coverage)
+    if _NORTHDATA.enabled and (not country_upper or country_upper == "DE"):
+        tasks.append(_NORTHDATA.search(company_name))
+    if _OPENDATABOT.enabled and (not country_upper or country_upper == "UA"):
+        tasks.append(_OPENDATABOT.search(company_name))
 
     all_batches = await asyncio.gather(*tasks, return_exceptions=True)
 

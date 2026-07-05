@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     uk_companies_house_api_key: str = ""
     uk_companies_house_api_url: str = "https://api.company-information.service.gov.uk"
     opencorporates_api_key: str = ""
+    northdata_api_key: str = ""  # commercial — activates NorthData DE/EU verifier
+    opendatabot_api_key: str = ""  # commercial — activates Opendatabot UA verifier
 
     pi_camera_root_ca_pem: str = ""
 
