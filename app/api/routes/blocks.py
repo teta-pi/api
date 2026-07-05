@@ -65,6 +65,22 @@ async def list_blocks(
     return list(result.scalars().all())
 
 
+@blocks_router.patch("/reorder", status_code=200)
+async def reorder_blocks(
+    payload: BlockReorder,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    for i, block_id in enumerate(payload.block_ids):
+        result = await db.execute(select(Block).where(Block.id == block_id))
+        block = result.scalar_one_or_none()
+        if not block:
+            continue
+        await _get_owned_business(block.business_id, current_user, db)
+        block.order = i
+    return {"ok": True}
+
+
 @blocks_router.patch("/{block_id}", response_model=BlockOut)
 async def update_block(
     block_id: uuid.UUID,
@@ -97,19 +113,3 @@ async def delete_block(
         raise HTTPException(status_code=404, detail="Block not found")
     await _get_owned_business(block.business_id, current_user, db)
     await db.delete(block)
-
-
-@blocks_router.patch("/reorder", status_code=200)
-async def reorder_blocks(
-    payload: BlockReorder,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-) -> dict:
-    for i, block_id in enumerate(payload.block_ids):
-        result = await db.execute(select(Block).where(Block.id == block_id))
-        block = result.scalar_one_or_none()
-        if not block:
-            continue
-        await _get_owned_business(block.business_id, current_user, db)
-        block.order = i
-    return {"ok": True}
