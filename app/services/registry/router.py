@@ -52,9 +52,15 @@ async def verify_business_in_registry(
     country_upper = country.upper() if country else None
     tasks = []
 
-    # 1. Country-specific verifier
+    # 1. Country-specific verifier — or ALL free country registries when
+    #    the country is unknown (claim-flow search sends no country)
     if country_upper and country_upper in _VERIFIERS_BY_COUNTRY:
         tasks.append(_VERIFIERS_BY_COUNTRY[country_upper].search(company_name))
+    elif not country_upper:
+        for _code, _verifier in _VERIFIERS_BY_COUNTRY.items():
+            if _code == "US":
+                continue  # SEC added below
+            tasks.append(_verifier.search(company_name))
 
     # 2. GLEIF (always)
     tasks.append(_GLEIF.search(company_name, country=country))

@@ -1,107 +1,119 @@
+import re
+
 import httpx
+from bs4 import BeautifulSoup
 from rapidfuzz import fuzz
 
 from app.services.registry.base import RegistryResult, RegistryVerifier
 
+_REG_NO = re.compile(r"(HRA|HRB|GnR|VR|PR)\s*\d+(\s+[A-Z]+)?")
+
 
 class GermanyHandelsregisterVerifier(RegistryVerifier):
     """
-    Germany company search via offenes-register.de (open-source, JSON, no auth required).
-    Covers HRB/HRA entries from Handelsregister. Falls back to the official HR portal
-    HTML scrape only if the open API is unavailable.
+    Germany — official common register portal (handelsregister.de).
+    Free public access guaranteed by § 9 HGB; no API, so we drive the
+    JSF search form directly (same flow as bundesAPI/handelsregister).
+    Covers GmbH, UG, AG, e.V., OHG, KG — all German register entries.
     """
 
     registry_name = "Handelsregister"
     country_code = "DE"
 
-    _OPEN_URL = "https://api.offeneregister.de/companies"
-    _HR_URL = "https://www.handelsregister.de/rp_web/search"
+    _BASE = "https://www.handelsregister.de"
+    _HEADERS = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        "Accept-Language": "de-DE,de;q=0.9,en;q=0.6",
+    }
+
+    @staticmethod
+    def _collect_form_fields(form) -> dict:
+        data: dict[str, str] = {}
+        for i in form.find_all("input"):
+            n = i.get("name")
+            if n and i.get("type") not in ("submit", "button"):
+                data[n] = i.get("value", "")
+        for t in form.find_all("textarea"):
+            if t.get("name"):
+                data[t["name"]] = ""
+        for s in form.find_all("select"):
+            n = s.get("name")
+            if not n:
+                continue
+            sel = s.find("option", selected=True) or s.find("option")
+            data[n] = sel.get("value", "") if sel else ""
+        return data
 
     async def search(self, company_name: str) -> list[RegistryResult]:
-        results = await self._search_offenes_register(company_name)
-        if results:
-            return results
-        return await self._search_hr_portal(company_name)
+        try:
+            async with httpx.AsyncClient(
+                timeout=25.0, headers=self._HEADERS, follow_redirects=True
+            ) as client:
+                # 1. Homepage — session cookie + naviForm ViewState
+                resp = await client.get(f"{self._BASE}/")
+                soup = BeautifulSoup(resp.text, "html.parser")
+                navi = soup.find("form", {"name": "naviForm"})
+                if not navi:
+                    return [RegistryResult(found=False, registry=self.registry_name, error="portal layout changed (naviForm)")]
+                fields = {
+                    i.get("name"): i.get("value", "")
+                    for i in navi.find_all("input") if i.get("name")
+                }
+                fields["naviForm:erweiterteSucheLink"] = "naviForm:erweiterteSucheLink"
 
-    async def _search_offenes_register(self, company_name: str) -> list[RegistryResult]:
-        async with httpx.AsyncClient(timeout=12.0) as client:
-            try:
-                resp = await client.get(
-                    self._OPEN_URL,
-                    params={"search": company_name, "limit": 5},
-                )
-                resp.raise_for_status()
-                data = resp.json()
-            except (httpx.HTTPError, ValueError):
-                return []
+                # 2. Navigate to advanced search
+                resp = await client.post(f"{self._BASE}{navi['action']}", data=fields)
+                soup = BeautifulSoup(resp.text, "html.parser")
+                form = soup.find("form", {"id": "form"})
+                if not form:
+                    return [RegistryResult(found=False, registry=self.registry_name, error="portal layout changed (search form)")]
 
+                # 3. Submit search — option 1 = all keywords (option 2 requires
+                #    extra filters since the 2025 portal update)
+                data = self._collect_form_fields(form)
+                data["form:schlagwoerter"] = company_name
+                data["form:schlagwortOptionen"] = "1"
+                data["form:btnSuche"] = "Suchen"
+                resp = await client.post(f"{self._BASE}{form['action']}", data=data)
+        except httpx.HTTPError as e:
+            return [RegistryResult(found=False, registry=self.registry_name, error=str(e))]
+
+        soup = BeautifulSoup(resp.text, "html.parser")
         results = []
-        items = data if isinstance(data, list) else data.get("results", [])
-        for item in items[:5]:
-            name = item.get("name", "")
+        for row in soup.find_all("tr", attrs={"data-ri": True})[:5]:
+            cells = [c.get_text(" ", strip=True) for c in row.find_all("td")]
+            if len(cells) < 4:
+                continue
+            court_and_no = cells[1] if len(cells) > 1 else ""
+            name = cells[2] if len(cells) > 2 else ""
+            city = cells[3] if len(cells) > 3 else ""
+            status = cells[4] if len(cells) > 4 else ""
+
             score = fuzz.token_sort_ratio(
-                self._normalize_name(company_name),
-                self._normalize_name(name),
+                self._normalize_name(company_name), self._normalize_name(name)
             )
-            if score >= 45:
-                results.append(
-                    RegistryResult(
-                        found=True,
-                        registry=self.registry_name,
-                        registration_number=item.get("registered_number") or item.get("native_company_number", ""),
-                        legal_name=name,
-                        status=(item.get("current_status") or "active").lower(),
-                        founded=item.get("registered_at") or item.get("incorporation_date"),
-                        address=item.get("registered_address") or "",
-                        raw=item,
-                    )
-                )
-        return results
+            # partial_ratio catches "WumWam" inside longer legal names
+            partial = fuzz.partial_ratio(company_name.lower(), name.lower())
+            if score < 45 and partial < 80:
+                continue
 
-    async def _search_hr_portal(self, company_name: str) -> list[RegistryResult]:
-        import re
-        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-            try:
-                resp = await client.post(
-                    self._HR_URL,
-                    data={
-                        "schlagwoerter": company_name,
-                        "schlagwortOptionen": "2",
-                        "registerArt": "HRB",
-                        "maxErgebnisse": "5",
-                    },
-                )
-                resp.raise_for_status()
-            except httpx.HTTPError as e:
-                return [RegistryResult(found=False, registry=self.registry_name, error=str(e))]
+            m = _REG_NO.search(court_and_no)
+            reg_no = m.group(0).strip() if m else ""
+            court = _REG_NO.sub("", court_and_no).strip()
 
-        results = []
-        pattern = r"<td[^>]*>([^<]*(?:GmbH|AG|KG|OHG|e\.V\.|SE|UG)[^<]*)</td>"
-        matches = re.findall(pattern, resp.text, re.IGNORECASE)
-        for match in matches[:5]:
-            name = match.strip()
-            score = fuzz.token_sort_ratio(self._normalize_name(company_name), self._normalize_name(name))
-            if score >= 50:
-                hrb_match = re.search(r"(HRB|HRA)\s*(\d+)", resp.text)
-                reg_num = f"{hrb_match.group(1)}-{hrb_match.group(2)}" if hrb_match else ""
-                results.append(
-                    RegistryResult(
-                        found=True,
-                        registry=self.registry_name,
-                        registration_number=reg_num,
-                        legal_name=name,
-                        status="active",
-                        raw={"source": "handelsregister.de", "name": name},
-                    )
+            results.append(
+                RegistryResult(
+                    found=True,
+                    registry=self.registry_name,
+                    registration_number=reg_no,
+                    legal_name=name,
+                    status="active" if "aktuell" in status.lower() else (status or "unknown"),
+                    address=city or None,
+                    raw={"court": court},
                 )
+            )
         return results
 
     async def get_by_id(self, registration_number: str) -> RegistryResult | None:
-        return RegistryResult(
-            found=True,
-            registry=self.registry_name,
-            registration_number=registration_number,
-            legal_name="",
-            status="requires_manual_verification",
-            raw={"registration_number": registration_number},
-        )
+        # Portal supports register-number search, but v1 resolves by name only
+        return None
