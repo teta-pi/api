@@ -37,6 +37,10 @@ class Settings(BaseSettings):
     c2pa_signing_cert_pem: str = ""
     c2pa_root_ca_pem: str = ""
 
+    # Self-hosted GoatCounter analytics — read-only SQLite bridge for the
+    # Back Office Analytics tab. See docs/analytics.md.
+    goatcounter_db_path: str = "/opt/goatcounter/db/goatcounter.sqlite3"
+
     cors_origins: list[str] = [
         "http://localhost:3000",
         "http://localhost:3001",

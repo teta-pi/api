@@ -16,6 +16,7 @@ from app.models.business import Business
 from app.models.claim import Claim
 from app.models.user import User
 from app.models.verification_event import VerificationEvent
+from app.services.analytics import get_goatcounter_stats
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -91,6 +92,22 @@ async def admin_stats(
         },
         "verification_events": events_total,
     }
+
+
+# ── Site analytics (GoatCounter bridge) ───────────────────────────────────────
+
+
+@router.get("/analytics")
+async def analytics(
+    days: int = Query(default=14, ge=1, le=90),
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Real visitor traffic from the self-hosted GoatCounter instance
+    (stats.tetapi.dev). Read-only — see docs/analytics.md."""
+    stats = await get_goatcounter_stats(days)
+    await _audit(db, admin, "analytics.view")
+    return stats
 
 
 # ── Users ─────────────────────────────────────────────────────────────────────
