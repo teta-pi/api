@@ -1,4 +1,6 @@
+import asyncio
 import re
+import time
 
 import httpx
 from bs4 import BeautifulSoup
@@ -21,6 +23,12 @@ class GermanyHandelsregisterVerifier(RegistryVerifier):
     country_code = "DE"
 
     _BASE = "https://www.handelsregister.de"
+
+    # The portal dislikes concurrent JSF sessions — serialize access,
+    # cache results (10 min) and retry once on transient empty responses.
+    _lock: asyncio.Lock = asyncio.Lock()
+    _cache: dict[str, tuple[float, list]] = {}
+    _CACHE_TTL = 600.0
     _HEADERS = {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
         "Accept-Language": "de-DE,de;q=0.9,en;q=0.6",
@@ -45,6 +53,26 @@ class GermanyHandelsregisterVerifier(RegistryVerifier):
         return data
 
     async def search(self, company_name: str) -> list[RegistryResult]:
+        key = company_name.strip().lower()
+        cached = self._cache.get(key)
+        if cached and time.monotonic() - cached[0] < self._CACHE_TTL:
+            return cached[1]
+
+        async with self._lock:
+            cached = self._cache.get(key)
+            if cached and time.monotonic() - cached[0] < self._CACHE_TTL:
+                return cached[1]
+            results = await self._search_portal(company_name)
+            if not results:
+                await asyncio.sleep(1.5)
+                results = await self._search_portal(company_name)
+            self._cache[key] = (time.monotonic(), results)
+            if len(self._cache) > 500:
+                oldest = min(self._cache, key=lambda k: self._cache[k][0])
+                del self._cache[oldest]
+            return results
+
+    async def _search_portal(self, company_name: str) -> list[RegistryResult]:
         try:
             async with httpx.AsyncClient(
                 timeout=25.0, headers=self._HEADERS, follow_redirects=True
