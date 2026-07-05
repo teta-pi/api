@@ -98,14 +98,21 @@ async def verify_business_in_registry(
                 seen.add(key)
                 merged.append(r)
 
-    # Prefer country-specific matches, then GLEIF, then OpenCorporates, then SEC
-    _PRIORITY = {"Handelsregister": 0, "EDR": 0, "Companies House": 0,
-                 "Brønnøysundregistrene": 0, "SEC EDGAR": 1, "GLEIF": 2}
+    # Rank primarily by name similarity to the query, then keep
+    # country-specific registries ahead of global fallbacks on ties.
+    from rapidfuzz import fuzz
 
-    def _sort_key(r: RegistryResult) -> int:
-        if country_upper and not r.registry.startswith("GLEIF") and not r.registry.startswith("OpenCorporates") and r.registry != "SEC EDGAR":
-            return 0
-        return _PRIORITY.get(r.registry, 3)
+    _FALLBACK = {"GLEIF": 1, "OpenCorporates": 2}
+
+    def _sort_key(r: RegistryResult) -> tuple:
+        similarity = max(
+            fuzz.token_sort_ratio(company_name.lower(), r.legal_name.lower()),
+            fuzz.partial_ratio(company_name.lower(), r.legal_name.lower()),
+        )
+        fallback_rank = next(
+            (v for k, v in _FALLBACK.items() if r.registry.startswith(k)), 0
+        )
+        return (-similarity, fallback_rank)
 
     merged.sort(key=_sort_key)
     return merged
