@@ -39,6 +39,7 @@ async def twira_resolve(
     query: str,
     entity_types: list[str] | None = None,
     limit: int = 10,
+    min_trust: float | None = None,
 ) -> list[dict]:
     """Returns ranked entities with TWIRA breakdown. Empty list when no
     embeddings exist yet — caller should fall back to keyword resolution."""
@@ -59,6 +60,8 @@ async def twira_resolve(
     stmt = select(Business).where(Business.id.in_(candidate_ids))
     if entity_types:
         stmt = stmt.where(Business.entity_type.in_(entity_types))
+    if min_trust is not None:
+        stmt = stmt.where(Business.t_score >= min_trust)
     entities = (await db.execute(stmt)).scalars().all()
     if not entities:
         return []
