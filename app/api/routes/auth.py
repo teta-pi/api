@@ -2,7 +2,7 @@ import logging
 import secrets
 
 import redis.asyncio as aioredis
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,7 +11,7 @@ from app.core.auth import create_access_token, hash_password, verify_password
 from app.core.config import settings
 from app.core.database import get_db
 from app.models.user import User
-from app.schemas.user import LoginRequest, MagicLinkRequest, Token, UserCreate, UserOut
+from app.schemas.user import LoginRequest, MagicLinkRequest, Token
 from app.api.deps import get_current_user
 from app.services.email import send_verification_code
 
@@ -22,23 +22,6 @@ _redis = aioredis.from_url(settings.redis_url, decode_responses=True)
 
 _CODE_TTL = 900  # 15 minutes
 _MAX_ATTEMPTS = 5
-
-
-@router.post("/register", response_model=UserOut, status_code=status.HTTP_201_CREATED)
-async def register(payload: UserCreate, db: AsyncSession = Depends(get_db)) -> User:
-    existing = await db.execute(select(User).where(User.email == payload.email))
-    if existing.scalar_one_or_none():
-        raise HTTPException(status_code=400, detail="Email already registered")
-
-    user = User(
-        email=payload.email,
-        hashed_password=hash_password(payload.password) if payload.password else None,
-        full_name=payload.full_name,
-        auth_provider=payload.auth_provider,
-    )
-    db.add(user)
-    await db.flush()
-    return user
 
 
 @router.post("/token", response_model=Token)

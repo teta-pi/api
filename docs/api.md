@@ -8,7 +8,6 @@ Auth via `Authorization: Bearer <JWT|pk_live_…>`; deps in `api/app/api/deps.py
 ## Auth (`routes/auth.py`)
 | Method | Path | Notes |
 |---|---|---|
-| POST | `/auth/register` | ⚠ public, no email verification — legacy/unused by app, see known-issues |
 | POST | `/auth/token` | password sign-in → JWT |
 | POST | `/auth/magic-link` | legacy, superseded by email-code |
 | POST | `/auth/email-code` | send 6-digit code (Redis, 15 min, 60s cooldown) |
