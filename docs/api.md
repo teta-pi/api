@@ -42,11 +42,14 @@ Auth via `Authorization: Bearer <JWT|pk_live_…>`; deps in `api/app/api/deps.py
 `GET /claim/stats` (total / pay_ready / pct).
 
 ## Admin (back office) — `routes/admin.py`, all `require_admin` + audited
-`GET /admin/stats`, `/admin/users` (search/filter/paginate), `/admin/users/{id}`,
-`/admin/users/{id}/export` (GDPR), `POST /admin/users/{id}/anonymize`,
-`GET /admin/users/{id}/flags` (disposable email / dup registry_id / country
-mismatch), `POST /admin/entities/{id}/validate` (re-check registry → append-only
-event), `/admin/claims`, `/admin/entities`, `/admin/audit-log`.
+`GET /admin/stats`, `GET /admin/analytics` (GoatCounter traffic bridge, see
+`docs/analytics.md`), `GET /admin/product-metrics` (growth trends, entity_type
+mix, claim→verified funnel — see `docs/analytics.md`), `/admin/users`
+(search/filter/paginate), `/admin/users/{id}`, `/admin/users/{id}/export`
+(GDPR), `POST /admin/users/{id}/anonymize`, `GET /admin/users/{id}/flags`
+(disposable email / dup registry_id / country mismatch), `POST
+/admin/entities/{id}/validate` (re-check registry → append-only event),
+`/admin/claims`, `/admin/entities`, `/admin/audit-log`.
 
 ## Services (`api/app/services/`)
 `ai.py` (OpenAI embeddings + categories), `bitcoin.py` (OpenTimestamps, not

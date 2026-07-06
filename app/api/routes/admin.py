@@ -110,6 +110,98 @@ async def analytics(
     return stats
 
 
+# ── Product metrics (growth, funnel — distinct from site traffic above) ───────
+
+
+@router.get("/product-metrics")
+async def product_metrics(
+    days: int = Query(default=30, ge=1, le=180),
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Product-level metrics the /stats snapshot and GoatCounter traffic bridge
+    don't cover: growth trends, entity_type mix, and the claim → verified
+    funnel. Pure read-only aggregation over businesses/claims/verification_events
+    — see docs/analytics.md."""
+    entity_growth_rows = (
+        await db.execute(
+            text(
+                """
+                select date_trunc('day', created_at) as day, count(*) as total
+                from businesses
+                where created_at > now() - (interval '1 day' * :days)
+                group by day order by day asc
+                """
+            ),
+            {"days": days},
+        )
+    ).all()
+
+    events_daily_rows = (
+        await db.execute(
+            text(
+                """
+                select date_trunc('day', created_at) as day, count(*) as total
+                from verification_events
+                where created_at > now() - (interval '1 day' * :days)
+                group by day order by day asc
+                """
+            ),
+            {"days": days},
+        )
+    ).all()
+
+    entities_by_type_rows = (
+        await db.execute(select(Business.entity_type, func.count(Business.id)).group_by(Business.entity_type))
+    ).all()
+
+    # Claim → verified funnel: waitlist claim → signed-up user (matched by
+    # email) → user created an entity → that entity got verified.
+    claims_total = (await db.execute(select(func.count(Claim.id)))).scalar_one()
+    signed_up = (
+        await db.execute(
+            select(func.count(func.distinct(Claim.id))).select_from(Claim).join(User, User.email == Claim.email)
+        )
+    ).scalar_one()
+    with_entity = (
+        await db.execute(
+            select(func.count(func.distinct(Claim.id)))
+            .select_from(Claim)
+            .join(User, User.email == Claim.email)
+            .join(Business, Business.owner_id == User.id)
+        )
+    ).scalar_one()
+    verified = (
+        await db.execute(
+            select(func.count(func.distinct(Claim.id)))
+            .select_from(Claim)
+            .join(User, User.email == Claim.email)
+            .join(Business, Business.owner_id == User.id)
+            .where(Business.verification_level != "none")
+        )
+    ).scalar_one()
+
+    await _audit(db, admin, "product_metrics.view", detail={"days": days})
+    return {
+        "entity_growth": [{"day": r.day.date().isoformat(), "total": r.total} for r in entity_growth_rows],
+        "verification_events_daily": [
+            {"day": r.day.date().isoformat(), "total": r.total} for r in events_daily_rows
+        ],
+        "entities_by_type": {t: c for t, c in entities_by_type_rows},
+        "funnel": {
+            "claims": claims_total,
+            "signed_up": signed_up,
+            "created_entity": with_entity,
+            "verified": verified,
+        },
+        "registry_search_health": {
+            "available": False,
+            "note": "No request logging exists for registry_search.py / the registry verifiers — "
+            "add logging (e.g. an endpoint_probes-style table) before this can be built.",
+        },
+    }
+
+
 # ── Users ─────────────────────────────────────────────────────────────────────
 
 
