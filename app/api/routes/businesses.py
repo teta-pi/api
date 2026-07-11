@@ -13,6 +13,8 @@ from app.models.business import Business
 from app.models.block import Block
 from app.models.media import Media
 from app.models.user import User
+from app.models.verification_event import VerificationEvent
+from app.twira.provenance import current_btc_height
 from app.schemas.business import (
     AgentBusinessProfile,
     BusinessCreate,
@@ -350,6 +352,33 @@ async def get_proof(
                     "ots_proof_url": f"https://teta-pi.io/proofs/{m.id}.ots",
                 })
 
+    # Proof depth — read the Temporal Moat chronology (verification_events) so
+    # agents can set their own trust threshold from OTS lifecycle state, Bitcoin
+    # confirmation depth and C2PA chain length. Read-only; no new tables/workers.
+    events = (
+        await db.execute(
+            select(VerificationEvent.ots_status, VerificationEvent.btc_block).where(
+                VerificationEvent.entity_id == business_id
+            )
+        )
+    ).all()
+
+    status_rank = {"pending": 0, "anchored": 1, "confirmed": 2}
+    ots_status = None
+    if events:
+        ots_status = max(
+            (e.ots_status for e in events), key=lambda s: status_rank.get(s, -1)
+        )
+
+    # Deepest Bitcoin confirmation = oldest anchored event; more blocks = harder to forge.
+    height = await current_btc_height()
+    depths = [
+        height - e.btc_block
+        for e in events
+        if e.ots_status == "confirmed" and e.btc_block is not None
+    ]
+    btc_timestamp_depth = max(depths) if depths and height else None
+
     return {
         "registry_proof": {
             "source": registry_data.get("registry", ""),
@@ -360,4 +389,10 @@ async def get_proof(
         },
         "c2pa_proofs": c2pa_proofs,
         "bitcoin_proofs": bitcoin_proofs,
+        "proof_depth": {
+            "ots_status": ots_status,
+            "btc_timestamp_depth": btc_timestamp_depth,
+            "c2pa_chain_length": len(c2pa_proofs),
+            "event_count": len(events),
+        },
     }
