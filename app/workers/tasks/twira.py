@@ -49,6 +49,43 @@ async def _recompute_async() -> dict:
     return {"updated": updated}
 
 
+@celery_app.task(name="twira_backfill_block_embeddings")
+def backfill_block_embeddings() -> dict:
+    return asyncio.get_event_loop().run_until_complete(_backfill_embeddings_async())
+
+
+async def _backfill_embeddings_async() -> dict:
+    """One-off: embed public blocks that have no vector yet, so pgvector search
+    (TWIRA I) has data. Idempotent — only touches embedding IS NULL rows.
+    Aborts cleanly if the embedding provider is unavailable (empty result)."""
+    from sqlalchemy import select
+    from app.core.database import AsyncSessionLocal
+    from app.models.block import Block
+    from app.services.ai import block_embedding_text, generate_embedding
+
+    embedded = skipped = 0
+    async with AsyncSessionLocal() as db:
+        blocks = (
+            await db.execute(
+                select(Block).where(Block.is_public.is_(True), Block.embedding.is_(None))
+            )
+        ).scalars().all()
+        for block in blocks:
+            text_in = block_embedding_text(block.title, block.description)
+            if not text_in.strip():
+                skipped += 1
+                continue
+            emb = await generate_embedding(text_in)
+            if not emb:
+                logger.warning("Embedding backfill aborted: provider returned empty")
+                break
+            block.embedding = emb
+            embedded += 1
+        await db.commit()
+    logger.info("TWIRA embedding backfill: %s embedded, %s skipped", embedded, skipped)
+    return {"embedded": embedded, "skipped": skipped}
+
+
 @celery_app.task(name="ots_lifecycle")
 def ots_lifecycle() -> dict:
     return asyncio.get_event_loop().run_until_complete(_ots_lifecycle_async())

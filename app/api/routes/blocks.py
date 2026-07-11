@@ -11,6 +11,7 @@ from app.models.business import Business
 from app.models.block import Block
 from app.models.user import User
 from app.schemas.block import BlockCreate, BlockOut, BlockReorder, BlockUpdate
+from app.services.ai import block_embedding_text, generate_embedding
 
 router = APIRouter(prefix="/businesses/{business_id}/blocks", tags=["blocks"])
 blocks_router = APIRouter(prefix="/blocks", tags=["blocks"])
@@ -45,6 +46,10 @@ async def add_block(
         description=payload.description,
         order=payload.order,
     )
+    # Semantic vector for TWIRA I / pgvector search; no-op when no embedding key.
+    emb = await generate_embedding(block_embedding_text(payload.title, payload.description))
+    if emb:
+        block.embedding = emb
     db.add(block)
     await db.flush()
     await db.refresh(block, ["media"])
@@ -96,8 +101,14 @@ async def update_block(
         raise HTTPException(status_code=404, detail="Block not found")
 
     await _get_owned_business(block.business_id, current_user, db)
-    for field, value in payload.model_dump(exclude_none=True).items():
+    fields = payload.model_dump(exclude_none=True)
+    for field, value in fields.items():
         setattr(block, field, value)
+    # Re-embed when the semantic text changed; no-op when no embedding key.
+    if "title" in fields or "description" in fields:
+        emb = await generate_embedding(block_embedding_text(block.title, block.description))
+        if emb:
+            block.embedding = emb
     return block
 
 

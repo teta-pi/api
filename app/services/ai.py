@@ -54,6 +54,11 @@ async def categorize_business(
         return {}
 
 
+def block_embedding_text(title: str | None, description: str | None) -> str:
+    """Text fed to the embedder for a block (title + description)."""
+    return "\n".join(p for p in (title, description) if p)
+
+
 async def generate_embedding(text: str) -> list[float]:
     """Generate text embedding using OpenAI text-embedding-3-small."""
     if not settings.openai_api_key:
