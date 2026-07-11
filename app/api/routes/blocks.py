@@ -1,6 +1,7 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,6 +16,27 @@ from app.services.ai import block_embedding_text, generate_embedding
 
 router = APIRouter(prefix="/businesses/{business_id}/blocks", tags=["blocks"])
 blocks_router = APIRouter(prefix="/blocks", tags=["blocks"])
+
+# Optional bearer: lets anonymous/agent readers through while still identifying
+# the owner. auto_error=False → no Authorization header yields None, not a 403.
+_optional_security = HTTPBearer(auto_error=False)
+
+
+async def _get_optional_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_optional_security),
+    db: AsyncSession = Depends(get_db),
+) -> User | None:
+    """Resolve the caller if a valid token is present, else None.
+
+    Reuses get_current_user's full logic (API keys, token version) so anonymous
+    and invalid-token requests fall through to the public view instead of 401.
+    """
+    if credentials is None:
+        return None
+    try:
+        return await get_current_user(credentials, db)
+    except HTTPException:
+        return None
 
 
 async def _get_owned_business(
@@ -60,13 +82,27 @@ async def add_block(
 async def list_blocks(
     business_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
+    current_user: User | None = Depends(_get_optional_user),
 ) -> list[Block]:
-    result = await db.execute(
+    # The owner sees every block (the profile edit page needs all of them);
+    # non-owners and anonymous callers only see is_public blocks.
+    result = await db.execute(select(Business).where(Business.id == business_id))
+    business = result.scalar_one_or_none()
+    is_owner = (
+        business is not None
+        and current_user is not None
+        and business.owner_id == current_user.id
+    )
+
+    query = (
         select(Block)
         .where(Block.business_id == business_id)
         .options(selectinload(Block.media))
         .order_by(Block.order)
     )
+    if not is_owner:
+        query = query.where(Block.is_public.is_(True))
+    result = await db.execute(query)
     return list(result.scalars().all())
 
 
