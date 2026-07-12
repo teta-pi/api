@@ -23,6 +23,9 @@ class VerificationEvent(Base):
         UUID(as_uuid=True), ForeignKey("businesses.id"), nullable=False
     )
     # 'registered' | 'level_up' | 'block_signed' | 'endpoint_verified' | 'reverified'
+    # | 'email_verified' | 'domain_verified' | 'document_verified'
+    # (verification rework, docs/verification-rework.md §4 — document_verified
+    # added here as a type only, no backend/upload endpoint yet)
     event_type: Mapped[str] = mapped_column(String(50), nullable=False)
     level: Mapped[int] = mapped_column(Integer, nullable=False)  # 1 | 2 | 3 at time of event
     # 'official_registry' | 'c2pa_camera' | 'linked_account' | 'self_declared'

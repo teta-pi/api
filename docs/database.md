@@ -17,6 +17,7 @@ Docker container `tetapi-postgres` (image `pgvector/pgvector:pg16`).
 | 008 | `users.full_name` → Text (holds Fernet ciphertext) |
 | 009 | `users.token_version` |
 | 010 | `users.avatar_url` |
+| 011 | `businesses.legal_entity_id` (nullable self-FK, brand→legal entity link); asserts append-only trigger from 006 is still attached |
 
 ## Core tables
 - **users** — id, email (unique, plaintext for login/index), `full_name`
@@ -26,7 +27,9 @@ Docker container `tetapi-postgres` (image `pgvector/pgvector:pg16`).
   `entity_type` (12-value enum), `segment` (builder|operator|consumer), name, slug,
   description, country, registry_id, registry_status, registry_data(jsonb),
   verification_level, agent_endpoint(+verified), is_public, is_published,
-  `t_score`, `p_score`, timestamps.
+  `t_score`, `p_score`, `legal_entity_id?` (self-FK — brand→verified legal
+  entity link, e.g. "Google" brand → "Alphabet Inc." legal entity; publicly
+  disclosed on profile), timestamps.
 - **blocks** — id, business_id→businesses, title, description, order,
   verification_status, is_public, `c2pa_manifest`(jsonb), `ots_proof`(bytea),
   `embedding` vector(1536) + HNSW index.
@@ -36,7 +39,13 @@ Docker container `tetapi-postgres` (image `pgvector/pgvector:pg16`).
 - **verification_events** (Temporal Moat, append-only) — entity_id, event_type,
   level, source, payload_hash(sha256), ots_proof?, ots_status
   (pending→anchored→confirmed), btc_block?, created_at. Trigger blocks DELETE and
-  any UPDATE except the OTS lifecycle columns.
+  any UPDATE except the OTS lifecycle columns. `event_type` is a plain
+  String(50), no DB-level enum/check constraint — allowed values are
+  documented on the model: `registered | level_up | block_signed |
+  endpoint_verified | reverified | email_verified | domain_verified |
+  document_verified` (the last three added 011 for the verification rework,
+  see `docs/verification-rework.md`; `document_verified` is type-only for now,
+  no backend/upload endpoint until file-upload risk is handled).
 - **endpoint_probes** — entity_id, ok(bool), at. Feeds TWIRA uptime.
 - **admin_audit_log** (append-only) — actor_id/email, action, target_type/id,
   detail(jsonb), created_at. Trigger blocks all UPDATE/DELETE.

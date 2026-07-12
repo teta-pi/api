@@ -42,6 +42,13 @@ class Business(Base):
     entity_type: Mapped[str] = mapped_column(String(50), default="business")
     segment: Mapped[str] = mapped_column(String(20), default="operator")  # builder | operator | consumer
 
+    # Brand -> verified legal entity link (e.g. "Google" brand -> "Alphabet
+    # Inc." legal entity), in place of forcing a registry name-match at
+    # creation. Publicly disclosed on the profile, not hidden.
+    legal_entity_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("businesses.id"), nullable=True
+    )
+
     # TWIRA precomputed components (SystemSpec v2.1 §03)
     t_score: Mapped[float] = mapped_column(default=0.0)
     p_score: Mapped[float] = mapped_column(default=0.0)
@@ -76,3 +83,4 @@ class Business(Base):
     blocks: Mapped[list["Block"]] = relationship(  # noqa: F821
         back_populates="business", cascade="all, delete-orphan", order_by="Block.order"
     )
+    legal_entity: Mapped["Business | None"] = relationship(remote_side=[id])
