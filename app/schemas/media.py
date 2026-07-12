@@ -34,6 +34,7 @@ class DeviceRegisterResponse(BaseModel):
     api_key: str
     entity_id: str
     entity_name: str
+    entity_slug: str | None = None
     registered_at: datetime
 
 

@@ -42,6 +42,7 @@ async def _bitcoin_timestamp_bg(media_id: str, content_hex: str) -> None:
 from app.api.deps import get_current_user
 from app.core.database import get_db
 from app.core.redis import get_redis
+from app.models.block import Block
 from app.models.business import Business
 from app.models.device import Device
 from app.models.media import Media
@@ -115,8 +116,28 @@ async def device_upload_media(
         except ValueError:
             pass
 
+    # Find-or-create the default "Pi CAM Captures" block for this device's entity.
+    # This makes uploads visible in /businesses/{id}/proof and /e/[slug].
+    cam_block = (
+        await db.execute(
+            select(Block).where(
+                Block.business_id == device.business_id,
+                Block.title == "Pi CAM Captures",
+            )
+        )
+    ).scalar_one_or_none()
+    if not cam_block:
+        cam_block = Block(
+            business_id=device.business_id,
+            title="Pi CAM Captures",
+            is_public=True,
+            order=999,
+        )
+        db.add(cam_block)
+        await db.flush()
+
     media = Media(
-        block_id=None,
+        block_id=cam_block.id,
         type=mime_type.split("/")[0],
         storage_url=storage_url,
         original_hash=original_hash,
@@ -282,6 +303,7 @@ async def generate_registration_token(
     payload = json.dumps({
         "business_id": str(business.id),
         "entity_name": business.name,
+        "entity_slug": business.slug,
         "user_id": str(current_user.id),
     })
     await redis.setex(f"cam_reg:{token}", _TOKEN_TTL, payload)
@@ -311,6 +333,7 @@ async def register_device(
     token_data = json.loads(raw)
     business_id = uuid.UUID(token_data["business_id"])
     entity_name = token_data["entity_name"]
+    entity_slug = token_data.get("entity_slug")
 
     # Idempotent: same fingerprint → update public key and reactivate
     existing = await db.execute(
@@ -345,10 +368,16 @@ async def register_device(
     # One-time token — consume it
     await redis.delete(f"cam_reg:{payload.registration_token}")
 
+    # Fetch slug if not in token (backward compat: old tokens lack entity_slug)
+    if not entity_slug:
+        biz = (await db.execute(select(Business).where(Business.id == business_id))).scalar_one_or_none()
+        entity_slug = biz.slug if biz else None
+
     return {
         "device_id": device.id,
         "api_key": device.api_key,
         "entity_id": str(business_id),
         "entity_name": entity_name,
+        "entity_slug": entity_slug,
         "registered_at": device.registered_at,
     }
