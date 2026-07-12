@@ -1,9 +1,11 @@
 """Back Office admin API (A2). Every endpoint requires admin/support role
 and records an entry in the append-only admin_audit_log."""
 
+import asyncio
 import uuid
 from datetime import datetime
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import func, select, text
@@ -199,6 +201,42 @@ async def product_metrics(
             "note": "No request logging exists for registry_search.py / the registry verifiers — "
             "add logging (e.g. an endpoint_probes-style table) before this can be built.",
         },
+    }
+
+
+# ── Service health (Owner Dashboard health row, roadmap 8.2) ──────────────────
+
+
+async def _ping(url: str) -> dict:
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(url)
+        return {"ok": resp.status_code < 400, "status_code": resp.status_code}
+    except httpx.HTTPError:
+        return {"ok": False, "status_code": None}
+
+
+@router.get("/health-check")
+async def health_check(
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Liveness for api.tetapi.dev, mcp.tetapi.dev, stats.tetapi.dev. Pinged
+    server-side (not from the browser) because mcp.tetapi.dev's /health
+    handler sends no CORS headers — a direct browser fetch would read as
+    'down' even when the process is healthy. This endpoint responding at all
+    proves the API itself is up."""
+    mcp_result, stats_result = await asyncio.gather(
+        _ping("https://mcp.tetapi.dev/health"),
+        _ping("https://stats.tetapi.dev/"),
+    )
+
+    await _audit(db, admin, "health_check.view")
+    return {
+        "checked_at": datetime.utcnow().isoformat(),
+        "api": {"ok": True, "status_code": 200},
+        "mcp": mcp_result,
+        "stats": stats_result,
     }
 
 
