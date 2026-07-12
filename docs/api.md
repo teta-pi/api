@@ -21,10 +21,33 @@ Auth via `Authorization: Bearer <JWT|pk_live_…>`; deps in `api/app/api/deps.py
 | GET | `/auth/me` | account summary |
 
 ## Entities & content
-- `routes/businesses.py` — CRUD (owner-checked), `POST /businesses` (auth'd,
-  triggers async registry verification), `GET /businesses/{id}/preview` (agent
-  JSON), `GET /businesses/{id}/proof`, `GET /businesses/by-slug/{slug}/public`
-  (published+public only, public blocks only — powers `/e/[slug]`).
+- `routes/businesses.py` — CRUD (owner-checked). `POST /businesses` creates any
+  name immediately, free, unverified (L0) — **no registry call**
+  (`registry_status="unverified"`, `is_published=is_public=True` for every
+  entity_type). Verification is now a choice of independent, owner-triggered
+  methods (docs/verification-rework.md §2), each writing its own append-only
+  `verification_events` row on success:
+  - `POST /{id}/verify/registry` — official registry match (existing check,
+    now explicit instead of automatic at create/rename).
+  - `POST /{id}/verify/email/start` + `/confirm` — Business Email Control:
+    6-digit code to an address on the brand's own domain (Redis-backed, same
+    pattern as `/auth/email-code`, namespaced `biz_email_code:*`; rejects
+    free-mailbox domains). Writes `email_verified`.
+  - `POST /{id}/verify/domain/start` + `/check` — Domain Ownership: DNS TXT
+    (via DNS-over-HTTPS, no resolver dependency) or a `.well-known` file
+    token, same mechanism as the WordPress plugin. Writes `domain_verified`.
+  - Document upload: **not implemented** — UI-only "Coming soon" is 3.4's job.
+  - `POST` / `DELETE /{id}/legal-entity` — link/unlink a brand to a verified
+    legal entity (`businesses.legal_entity_id`); requires the caller to own
+    both entities and the legal entity to already be `registry_status=verified`.
+    Publicly disclosed via `legal_entity` in the public/preview payloads, not hidden.
+  - `POST /{id}/publish` no longer gates on registry verification (entities are
+    already published at creation).
+  - `verification_level` (`none|registry|email|domain|partial|full`) is derived
+    on read from `registry_status` + `verification_events`, not stored.
+  - `GET /businesses/{id}/preview` (agent JSON), `GET /businesses/{id}/proof`,
+    `GET /businesses/by-slug/{slug}/public` (published+public only, public
+    blocks only — powers `/e/[slug]`; includes the `legal_entity` disclosure).
 - `routes/blocks.py` — block CRUD, owner-checked via parent business.
 - `routes/media.py` — `/media/upload` (JWT), `/media/device-upload` (api_key),
   local storage under `UPLOAD_DIR`, served at `/media/local/{id}/{name}`.
@@ -54,7 +77,11 @@ mix, claim→verified funnel — see `docs/analytics.md`), `/admin/users`
 ## Services (`api/app/services/`)
 `ai.py` (OpenAI embeddings + categories), `bitcoin.py` (OpenTimestamps, not
 OP_RETURN), `c2pa.py`, `email.py` (Resend: verification codes, claim confirmation),
-`registry/` (verifiers + router).
+`registry/` (verifiers + router), `verification/` (`email_control.py` — business
+email control, reuses `email.py`'s Resend sender; `domain_ownership.py` — DNS
+TXT via DNS-over-HTTPS + `.well-known` file check; both used by
+`routes/businesses.py`'s `/verify/*` endpoints, no changes to `routes/auth.py`
+needed).
 
 ## Conventions
 - Rate limiters and the Handelsregister lock are **in-memory** → correct only under

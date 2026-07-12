@@ -30,6 +30,15 @@ Docker container `tetapi-postgres` (image `pgvector/pgvector:pg16`).
   `t_score`, `p_score`, `legal_entity_id?` (self-FK — brand→verified legal
   entity link, e.g. "Google" brand → "Alphabet Inc." legal entity; publicly
   disclosed on profile), timestamps.
+  Since the verification rework (1.3, `docs/verification-rework.md`):
+  creation no longer calls the registry — `registry_status` defaults to
+  `unverified` and every entity is `is_published=is_public=true` immediately.
+  `registry_status` values: `unverified | verified | not_found |
+  multiple_matches | failed`. `verification_level` is computed on read
+  (`routes/businesses.py::_compute_verification_level`), not written at create
+  time — it reads `registry_status` plus `verification_events` for
+  `email_verified`/`domain_verified` rows, so no new columns were needed for
+  the two new methods.
 - **blocks** — id, business_id→businesses, title, description, order,
   verification_status, is_public, `c2pa_manifest`(jsonb), `ots_proof`(bytea),
   `embedding` vector(1536) + HNSW index.

@@ -1,8 +1,12 @@
+import hashlib
+import json
 import logging
 import re
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from pydantic import BaseModel, EmailStr
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,9 +26,47 @@ from app.schemas.business import (
     BusinessUpdate,
 )
 from app.services.registry import verify_business_in_registry
+from app.services.verification import domain_ownership, email_control
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/businesses", tags=["businesses"])
+
+# Independent, optional verification methods (docs/verification-rework.md §2).
+# Each writes its own append-only verification_events row on success.
+_METHOD_EVENT_TYPES = {"email_verified", "domain_verified"}
+
+
+class EmailVerifyStartRequest(BaseModel):
+    email: EmailStr
+
+
+class EmailVerifyConfirmRequest(BaseModel):
+    email: EmailStr
+    code: str
+
+
+class DomainVerifyRequest(BaseModel):
+    domain: str
+
+
+class LegalEntityLinkRequest(BaseModel):
+    legal_entity_id: uuid.UUID
+
+
+def _event_payload_hash(payload: dict) -> bytes:
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).digest()
+
+
+async def _get_owned_business(
+    db: AsyncSession, business_id: uuid.UUID, current_user: User
+) -> Business:
+    result = await db.execute(select(Business).where(Business.id == business_id))
+    business = result.scalar_one_or_none()
+    if not business:
+        raise HTTPException(status_code=404, detail="Business not found")
+    if business.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not your business")
+    return business
 
 
 def _slugify(name: str) -> str:
@@ -34,9 +76,10 @@ def _slugify(name: str) -> str:
     return slug[:80]
 
 
-def _compute_verification_level(business: Business) -> str:
-    if business.registry_status != "verified":
-        return "none"
+async def _compute_verification_level(db: AsyncSession, business: Business) -> str:
+    """Derived, not stored: reflects whichever independent method (registry,
+    email, domain) — or media provenance — currently holds for this entity.
+    `business.blocks`/`.media` must already be loaded by the caller."""
     has_c2pa = any(
         m.c2pa_verified
         for block in business.blocks
@@ -51,7 +94,23 @@ def _compute_verification_level(business: Business) -> str:
         return "full"
     if has_btc:
         return "partial"
-    return "registry"
+
+    if business.registry_status == "verified":
+        return "registry"
+
+    result = await db.execute(
+        select(VerificationEvent.event_type)
+        .where(
+            VerificationEvent.entity_id == business.id,
+            VerificationEvent.event_type.in_(_METHOD_EVENT_TYPES),
+        )
+        .limit(1)
+    )
+    verified_via = result.scalar_one_or_none()
+    if verified_via:
+        return verified_via.removesuffix("_verified")  # "email" | "domain"
+
+    return "none"
 
 
 async def _run_registry_verification(business_id: str, name: str, country: str | None) -> None:
@@ -87,16 +146,17 @@ async def _run_registry_verification(business_id: str, name: str, country: str |
 @router.post("", response_model=BusinessOut, status_code=status.HTTP_201_CREATED)
 async def create_business(
     payload: BusinessCreate,
-    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> Business:
+    """Creation is decoupled from registry matching (docs/verification-rework.md
+    §1): any name is creatable immediately, free, unverified (L0) — no
+    registry call here. Registry match is now an explicit, optional
+    verification method (POST /{business_id}/verify/registry)."""
     slug = _slugify(payload.name)
     existing = await db.execute(select(Business).where(Business.slug == slug))
     if existing.scalar_one_or_none():
         slug = f"{slug}-{uuid.uuid4().hex[:6]}"
-
-    is_business = payload.entity_type == "business"
 
     business = Business(
         owner_id=current_user.id,
@@ -105,25 +165,14 @@ async def create_business(
         description=payload.description,
         country=payload.country,
         entity_type=payload.entity_type,
-        # Non-business entities (journalists/artists/orgs) are self-asserted:
-        # they're verified by email, not by registry
-        registry_status="self_asserted" if not is_business else "pending",
-        verification_level="registry" if not is_business else "none",
-        is_published=not is_business,  # Non-business goes live immediately
-        is_public=not is_business,
+        registry_status="unverified",
+        verification_level="none",
+        is_published=True,
+        is_public=True,
     )
     db.add(business)
     await db.flush()
     await db.refresh(business)
-
-    if is_business:
-        background_tasks.add_task(
-            _run_registry_verification,
-            str(business.id),
-            payload.name,
-            payload.country,
-        )
-
     return business
 
 
@@ -141,7 +190,7 @@ async def list_businesses(
     )
     businesses = list(result.scalars().all())
     for b in businesses:
-        b.verification_level = _compute_verification_level(b)
+        b.verification_level = await _compute_verification_level(db, b)
     return businesses
 
 
@@ -151,19 +200,10 @@ async def publish_business(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> Business:
-    result = await db.execute(
-        select(Business).where(Business.id == business_id)
-    )
-    business = result.scalar_one_or_none()
-    if not business:
-        raise HTTPException(status_code=404, detail="Business not found")
-    if business.owner_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not your business")
-    if business.entity_type == "business" and business.registry_status not in ("verified",):
-        raise HTTPException(
-            status_code=400,
-            detail="Business must be registry-verified before publishing",
-        )
+    """Publishing no longer requires registry verification (docs/verification-
+    rework.md §1) — entities are already published at creation; this endpoint
+    just re-publishes one that was manually unpublished."""
+    business = await _get_owned_business(db, business_id, current_user)
     business.is_published = True
     business.is_public = True
     await db.flush()
@@ -185,7 +225,7 @@ async def get_business(
         raise HTTPException(status_code=404, detail="Business not found")
 
     # Recompute verification level from facts
-    business.verification_level = _compute_verification_level(business)
+    business.verification_level = await _compute_verification_level(db, business)
     return business
 
 
@@ -193,28 +233,165 @@ async def get_business(
 async def update_business(
     business_id: uuid.UUID,
     payload: BusinessUpdate,
-    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> Business:
-    result = await db.execute(select(Business).where(Business.id == business_id))
-    business = result.scalar_one_or_none()
-    if not business:
-        raise HTTPException(status_code=404, detail="Business not found")
-    if business.owner_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not your business")
+    """Renaming no longer auto-triggers a registry check — registry match is
+    an explicit, optional method now (POST /{business_id}/verify/registry)."""
+    business = await _get_owned_business(db, business_id, current_user)
 
     for field, value in payload.model_dump(exclude_none=True).items():
         setattr(business, field, value)
 
     await db.flush()
-
-    if payload.name and business.entity_type == "business":
-        background_tasks.add_task(
-            _run_registry_verification, str(business.id), payload.name, business.country
-        )
-
     return business
+
+
+@router.post("/{business_id}/verify/registry")
+async def start_registry_verification(
+    business_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """Official Registry Match — one optional verification method (was
+    automatic at creation; now explicit, owner-triggered)."""
+    business = await _get_owned_business(db, business_id, current_user)
+    background_tasks.add_task(
+        _run_registry_verification, str(business.id), business.name, business.country
+    )
+    return {"message": "Registry verification started"}
+
+
+@router.post("/{business_id}/verify/email/start")
+async def start_email_verification_endpoint(
+    business_id: uuid.UUID,
+    payload: EmailVerifyStartRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """Business Email Control, step 1 — send a 6-digit code to an address on
+    the brand's own domain."""
+    await _get_owned_business(db, business_id, current_user)
+    await email_control.start_email_verification(payload.email, background_tasks)
+    return {"message": "Verification code sent — check the inbox."}
+
+
+@router.post("/{business_id}/verify/email/confirm")
+async def confirm_email_verification_endpoint(
+    business_id: uuid.UUID,
+    payload: EmailVerifyConfirmRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """Business Email Control, step 2 — verify the code and record the
+    (append-only) verification event."""
+    business = await _get_owned_business(db, business_id, current_user)
+    ok = await email_control.confirm_email_verification(payload.email, payload.code)
+    if not ok:
+        raise HTTPException(status_code=400, detail="Invalid or expired code")
+
+    db.add(
+        VerificationEvent(
+            entity_id=business.id,
+            event_type="email_verified",
+            level=1,
+            source="business_email",
+            payload_hash=_event_payload_hash({
+                "email": payload.email,
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+            }),
+        )
+    )
+    await db.commit()
+    return {"verified": True, "email": payload.email}
+
+
+@router.post("/{business_id}/verify/domain/start")
+async def start_domain_verification_endpoint(
+    business_id: uuid.UUID,
+    payload: DomainVerifyRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """Domain Ownership, step 1 — get a token + DNS TXT record / well-known
+    file instructions (same mechanism as the WordPress plugin)."""
+    await _get_owned_business(db, business_id, current_user)
+    return await domain_ownership.start_domain_verification(str(business_id), payload.domain)
+
+
+@router.post("/{business_id}/verify/domain/check")
+async def check_domain_verification_endpoint(
+    business_id: uuid.UUID,
+    payload: DomainVerifyRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """Domain Ownership, step 2 — check the DNS TXT record or well-known file
+    and record the (append-only) verification event on success."""
+    business = await _get_owned_business(db, business_id, current_user)
+    verified, method = await domain_ownership.check_domain_verification(
+        str(business_id), payload.domain
+    )
+    if not verified:
+        return {"verified": False}
+
+    db.add(
+        VerificationEvent(
+            entity_id=business.id,
+            event_type="domain_verified",
+            level=1,
+            source=method,
+            payload_hash=_event_payload_hash({
+                "domain": payload.domain,
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+            }),
+        )
+    )
+    await db.commit()
+    return {"verified": True, "domain": payload.domain, "method": method}
+
+
+@router.post("/{business_id}/legal-entity")
+async def link_legal_entity(
+    business_id: uuid.UUID,
+    payload: LegalEntityLinkRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """Link a brand to a verified legal entity (e.g. "Google" brand ->
+    "Alphabet Inc." legal entity) instead of forcing a registry name-match.
+    Publicly disclosed on the profile, not hidden (see public_profile_by_slug)."""
+    business = await _get_owned_business(db, business_id, current_user)
+
+    if payload.legal_entity_id == business.id:
+        raise HTTPException(status_code=400, detail="An entity cannot link to itself")
+
+    result = await db.execute(select(Business).where(Business.id == payload.legal_entity_id))
+    legal_entity = result.scalar_one_or_none()
+    if not legal_entity:
+        raise HTTPException(status_code=404, detail="Legal entity not found")
+    if legal_entity.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="You must own the legal entity too")
+    if legal_entity.registry_status != "verified":
+        raise HTTPException(status_code=400, detail="Legal entity must be registry-verified first")
+
+    business.legal_entity_id = legal_entity.id
+    await db.flush()
+    return {"legal_entity_id": str(legal_entity.id), "legal_entity_name": legal_entity.name}
+
+
+@router.delete("/{business_id}/legal-entity")
+async def unlink_legal_entity(
+    business_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    business = await _get_owned_business(db, business_id, current_user)
+    business.legal_entity_id = None
+    await db.flush()
+    return {"legal_entity_id": None}
 
 
 @router.get("/by-slug/{slug}/public")
@@ -232,7 +409,20 @@ async def public_profile_by_slug(
     if not business:
         raise HTTPException(status_code=404, detail="Entity not found")
 
-    trust_level = _compute_verification_level(business)
+    trust_level = await _compute_verification_level(db, business)
+
+    legal_entity = None
+    if business.legal_entity_id:
+        le = (
+            await db.execute(select(Business).where(Business.id == business.legal_entity_id))
+        ).scalar_one_or_none()
+        if le:
+            legal_entity = {
+                "id": str(le.id),
+                "name": le.name,
+                "slug": le.slug,
+                "registry_status": le.registry_status,
+            }
 
     blocks = []
     for block in sorted(business.blocks, key=lambda b: b.order):
@@ -263,6 +453,9 @@ async def public_profile_by_slug(
             "status": business.registry_status,
             "registry_id": business.registry_id,
         },
+        # Brand -> verified legal entity link, publicly disclosed, not hidden
+        # (docs/verification-rework.md §3).
+        "legal_entity": legal_entity,
         "agent_endpoint": business.agent_endpoint,
         "agent_endpoint_verified": business.agent_endpoint_verified,
         "blocks": blocks,
@@ -285,7 +478,7 @@ async def agent_preview(
     if not business:
         raise HTTPException(status_code=404, detail="Business not found")
 
-    trust_level = _compute_verification_level(business)
+    trust_level = await _compute_verification_level(db, business)
 
     blocks = []
     for block in business.blocks:
