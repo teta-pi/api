@@ -95,7 +95,7 @@ class IntentResolver:
 
             resolved.append(
                 IntentResolution(
-                    entity_id=biz.slug,
+                    entity_id=str(biz.id),
                     entity_type=biz.entity_type,
                     entity_name=biz.name,
                     relevance_score=round(score, 3),

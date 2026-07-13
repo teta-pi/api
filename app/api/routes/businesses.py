@@ -500,10 +500,13 @@ async def agent_preview(
 
     return {
         "id": business.id,
+        "entity_type": business.entity_type,
         "name": business.name,
         "description": business.description,
         "registry": business.registry_data,
         "trust_level": trust_level,
+        "agent_endpoint": business.agent_endpoint,
+        "agent_endpoint_verified": business.agent_endpoint_verified,
         "blocks": blocks,
     }
 

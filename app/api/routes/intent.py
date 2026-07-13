@@ -62,7 +62,7 @@ async def resolve_intent(
     if twira_results:
         results = [
             IntentResolution(
-                entity_id=r["entity"].slug,
+                entity_id=str(r["entity"].id),
                 entity_type=r["entity"].entity_type,
                 entity_name=r["entity"].name,
                 relevance_score=r["score"],
