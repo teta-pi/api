@@ -221,7 +221,10 @@ async def upload_media(
 @router.get("/local/{file_id}/{filename}")
 async def serve_local_media(file_id: str, filename: str) -> FileResponse:
     """Serve locally stored media files."""
-    path = _UPLOAD_DIR / file_id / filename
+    base = _UPLOAD_DIR.resolve()
+    path = (base / file_id / filename).resolve()
+    if not path.is_relative_to(base):
+        raise HTTPException(status_code=404, detail="File not found")
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(path)
