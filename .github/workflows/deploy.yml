@@ -1,0 +1,52 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    name: Deploy → api.tetapi.dev
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/tetapi_ed25519
+          chmod 600 ~/.ssh/tetapi_ed25519
+          ssh-keyscan -H 164.90.235.66 >> ~/.ssh/known_hosts
+
+      - name: Sync API code
+        run: |
+          rsync -az -e "ssh -i ~/.ssh/tetapi_ed25519" \
+            --delete \
+            --exclude='__pycache__' --exclude='*.pyc' \
+            --exclude='.venv' --exclude='.env' \
+            --exclude='certs/*.key.pem' \
+            ./ root@164.90.235.66:/opt/tetapi/api/
+
+      - name: Sync public certs
+        run: |
+          rsync -az -e "ssh -i ~/.ssh/tetapi_ed25519" \
+            certs/root_ca.cert.pem \
+            certs/signing.cert.pem \
+            certs/chain.cert.pem \
+            root@164.90.235.66:/opt/tetapi/api/certs/
+
+      - name: Migrate + restart
+        run: |
+          ssh -i ~/.ssh/tetapi_ed25519 root@164.90.235.66 bash << 'REMOTE'
+          set -e
+          cd /opt/tetapi/api
+          source /opt/tetapi/venv/bin/activate
+          pip install -q email-validator pgvector beautifulsoup4
+          alembic upgrade head
+          systemctl restart tetapi-api
+          sleep 4
+          systemctl is-active --quiet tetapi-api \
+            && echo "✓ API up" \
+            || { journalctl -u tetapi-api -n 30 --no-pager; exit 1; }
+          REMOTE
