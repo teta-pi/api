@@ -8,9 +8,7 @@ logger = logging.getLogger(__name__)
 
 RESEND_API_URL = "https://api.resend.com/emails"
 
-# Until tetapi.dev is verified in Resend, only onboarding@resend.dev is allowed as sender.
-# After domain verification switch to: "TETA+PI <hello@tetapi.dev>"
-FROM_ADDRESS = "TETA+PI <onboarding@resend.dev>"
+FROM_ADDRESS = "TETA+PI <verify@tetapi.dev>"
 
 CLAIM_CONFIRMATION_HTML = """\
 <div style="font-family:'Segoe UI',system-ui,sans-serif;max-width:520px;margin:0 auto;padding:32px 24px;color:#1A1035">
@@ -64,11 +62,17 @@ VERIFICATION_CODE_HTML = """\
 """
 
 
-async def send_verification_code(email: str, code: str) -> None:
-    """Send a 6-digit email verification code via Resend. Failures logged, never raised."""
+async def send_verification_code(email: str, code: str) -> bool:
+    """Send a 6-digit email verification code via Resend.
+
+    Returns True if the email was accepted for delivery (or logging stood in
+    for it because RESEND_API_KEY isn't set), False if Resend rejected it or
+    the request failed. Never raises — callers that need to surface send
+    failures to the user should check the return value.
+    """
     if not settings.resend_api_key:
         logger.info("RESEND_API_KEY not set — verification code for %s: %s", email, code)
-        return
+        return True
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(
@@ -83,8 +87,11 @@ async def send_verification_code(email: str, code: str) -> None:
             )
             if resp.status_code >= 400:
                 logger.error("Resend error %s for %s: %s", resp.status_code, email, resp.text)
+                return False
+            return True
     except httpx.HTTPError:
         logger.exception("Failed to send verification code to %s", email)
+        return False
 
 
 async def send_claim_confirmation(email: str, position: int, ready_to_pay: bool) -> None:

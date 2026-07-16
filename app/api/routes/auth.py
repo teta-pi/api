@@ -117,10 +117,7 @@ class VerifyCodeRequest(BaseModel):
 
 
 @router.post("/email-code")
-async def request_email_code(
-    payload: EmailCodeRequest,
-    background_tasks: BackgroundTasks,
-) -> dict:
+async def request_email_code(payload: EmailCodeRequest) -> dict:
     """Send a 6-digit verification code to the email. Code lives 15 min in Redis."""
     email = payload.email.lower().strip()
 
@@ -133,7 +130,12 @@ async def request_email_code(
     await _redis.setex(f"email_code_cooldown:{email}", 60, "1")
     await _redis.delete(f"email_code_attempts:{email}")
 
-    background_tasks.add_task(send_verification_code, email, code)
+    sent = await send_verification_code(email, code)
+    if not sent:
+        # Don't leave the user locked out by the cooldown for a code that never arrived.
+        await _redis.delete(f"email_code:{email}", f"email_code_cooldown:{email}")
+        raise HTTPException(status_code=502, detail="Could not send email, try again later")
+
     return {"message": "Verification code sent — check your inbox."}
 
 
