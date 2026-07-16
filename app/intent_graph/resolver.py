@@ -1,7 +1,7 @@
 import re
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import String, cast, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -57,7 +57,6 @@ class IntentResolver:
         if intent.verified_only:
             stmt = stmt.where(Business.verification_level != "none")
         if location:
-            from sqlalchemy import String, cast, or_
             stmt = stmt.where(
                 or_(
                     Business.country.ilike(f"%{location[:2]}%"),
@@ -67,11 +66,28 @@ class IntentResolver:
         if intent.has_agent_endpoint is True:
             stmt = stmt.where(Business.agent_endpoint.is_not(None))
 
+        q_lower = clean_q.lower().strip()
+        if q_lower:
+            # The query text must reach the DB filter, not just re-score an
+            # arbitrary LIMIT'd window — previously `clean_q` was never used
+            # to filter the SQL query, so once entity count exceeded the
+            # LIMIT below, true matches routinely fell outside the fetched
+            # window and resolve_intent silently returned nothing (QA 6.2).
+            tokens = [t for t in q_lower.split() if t]
+            conditions = [
+                Business.name.ilike(f"%{q_lower}%"),
+                Business.description.ilike(f"%{q_lower}%"),
+                cast(Business.ai_categories, String).ilike(f"%{q_lower}%"),
+                Business.slug.ilike(f"%{q_lower}%"),
+            ]
+            for tok in tokens:
+                conditions.append(Business.name.ilike(f"%{tok}%"))
+            stmt = stmt.where(or_(*conditions))
+
         result = await self.db.execute(stmt.limit(50))
         candidates = list(result.scalars().all())
 
         resolved: list[IntentResolution] = []
-        q_lower = clean_q.lower()
 
         for biz in candidates:
             name_score = 0.0
@@ -79,6 +95,8 @@ class IntentResolver:
                 name_score = 0.9
             elif any(tok in (biz.name or "").lower() for tok in q_lower.split()):
                 name_score = 0.6
+            elif q_lower in (biz.slug or "").lower():
+                name_score = 0.55
             elif q_lower in (biz.description or "").lower():
                 name_score = 0.5
             elif biz.ai_categories and q_lower in str(biz.ai_categories).lower():

@@ -1,7 +1,7 @@
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select
+from sqlalchemy import String, cast, or_, select
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -62,16 +62,34 @@ async def search_businesses(
     elif has_agent_endpoint is False:
         stmt = stmt.where(Business.agent_endpoint.is_(None))
 
+    q_stripped = q.strip()
+    if q_stripped:
+        # Query text must actually reach the DB filter — previously the
+        # SQL query ignored `q` entirely and only re-scored whichever rows
+        # the LIMIT/OFFSET happened to fetch, so matching entities outside
+        # that arbitrary window never surfaced (bug found by QA task 6.2).
+        pattern = f"%{q_stripped}%"
+        stmt = stmt.where(
+            or_(
+                Business.name.ilike(pattern),
+                Business.slug.ilike(pattern),
+                Business.description.ilike(pattern),
+                cast(Business.ai_categories, String).ilike(pattern),
+            )
+        )
+
     result = await db.execute(stmt.offset(offset).limit(limit))
     businesses = list(result.scalars().all())
 
     results = []
     for biz in businesses:
         relevance = 0.5
-        if q.strip():
-            q_lower = q.lower()
+        if q_stripped:
+            q_lower = q_stripped.lower()
             if q_lower in (biz.name or "").lower():
                 relevance = 0.9
+            elif q_lower in (biz.slug or "").lower():
+                relevance = 0.85
             elif q_lower in (biz.description or "").lower():
                 relevance = 0.7
             elif biz.ai_categories and q_lower in str(biz.ai_categories).lower():
