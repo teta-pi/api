@@ -244,6 +244,7 @@ async def update_business(
         setattr(business, field, value)
 
     await db.flush()
+    await db.refresh(business)
     return business
 
 
