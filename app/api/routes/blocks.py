@@ -1,3 +1,4 @@
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -14,6 +15,7 @@ from app.models.user import User
 from app.schemas.block import BlockCreate, BlockOut, BlockReorder, BlockUpdate
 from app.services.ai import block_embedding_text, generate_embedding
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/businesses/{business_id}/blocks", tags=["blocks"])
 blocks_router = APIRouter(prefix="/blocks", tags=["blocks"])
 
@@ -69,7 +71,12 @@ async def add_block(
         order=payload.order,
     )
     # Semantic vector for TWIRA I / pgvector search; no-op when no embedding key.
-    emb = await generate_embedding(block_embedding_text(payload.title, payload.description))
+    # Embedding is best-effort: a provider outage/quota error must not block block creation.
+    try:
+        emb = await generate_embedding(block_embedding_text(payload.title, payload.description))
+    except Exception as e:
+        logger.warning("Embedding generation failed for new block on %s: %s", business_id, e)
+        emb = None
     if emb:
         block.embedding = emb
     db.add(block)
