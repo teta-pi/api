@@ -4,7 +4,7 @@ from collections import defaultdict
 from xml.sax.saxutils import escape as xml_escape
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
-from sqlalchemy import select
+from sqlalchemy import String, cast, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -97,7 +97,7 @@ async def get_badge(
 
     result = await db.execute(
         select(Business).where(
-            (Business.slug == entity_id) | (Business.id.cast("text") == entity_id),
+            (Business.slug == entity_id) | (cast(Business.id, String) == entity_id),
             Business.is_published == True,  # noqa: E712
             Business.is_public == True,  # noqa: E712
         )
