@@ -73,7 +73,7 @@ async def resolve_intent(
                 registry_id=r["entity"].registry_id,
                 twira=TwiraBreakdown(score=r["score"], t=r["t"], i=r["i"], p=r["p"]),
                 first_verified_at=r["first_verified_at"],
-                proof_url=f"https://api.tetapi.dev/api/v1/businesses/{r['entity'].slug}/proof",
+                proof_url=f"https://app.tetapi.dev/e/{r['entity'].slug}",
             )
             for r in twira_results
         ]
