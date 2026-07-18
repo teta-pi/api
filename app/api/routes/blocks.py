@@ -148,8 +148,13 @@ async def update_block(
     for field, value in fields.items():
         setattr(block, field, value)
     # Re-embed when the semantic text changed; no-op when no embedding key.
+    # Embedding is best-effort: a provider outage/quota error must not block the update.
     if "title" in fields or "description" in fields:
-        emb = await generate_embedding(block_embedding_text(block.title, block.description))
+        try:
+            emb = await generate_embedding(block_embedding_text(block.title, block.description))
+        except Exception as e:
+            logger.warning("Embedding generation failed for block %s: %s", block_id, e)
+            emb = None
         if emb:
             block.embedding = emb
     return block
