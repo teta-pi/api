@@ -122,6 +122,7 @@ class IntentResolver:
                     agent_endpoint_verified=biz.agent_endpoint_verified,
                     country=biz.country,
                     registry_id=biz.registry_id,
+                    proof_url=f"https://app.tetapi.dev/e/{biz.slug}",
                 )
             )
 

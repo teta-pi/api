@@ -4,8 +4,11 @@ the request (no worker): DNS is checked via DNS-over-HTTPS (Cloudflare JSON
 API) rather than a resolver library, since httpx is already a dependency.
 """
 
+import asyncio
+import ipaddress
 import logging
 import secrets
+import socket
 from urllib.parse import urlparse
 
 import httpx
@@ -63,11 +66,30 @@ async def _check_dns_txt(domain: str, token: str) -> bool:
     return any(expected in a.get("data", "").strip('"') for a in answers)
 
 
-async def _check_file(domain: str, token: str) -> bool:
+async def _resolves_to_public_ip(domain: str) -> bool:
+    """Block SSRF via a domain that resolves to a private/loopback/link-local
+    address (e.g. the 169.254.169.254 cloud metadata endpoint)."""
     try:
+        loop = asyncio.get_event_loop()
+        infos = await loop.getaddrinfo(domain, None)
+    except socket.gaierror:
+        return False
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified:
+            return False
+    return True
+
+
+async def _check_file(domain: str, token: str) -> bool:
+    if not await _resolves_to_public_ip(domain):
+        return False
+    try:
+        # follow_redirects=False: a caller-controlled domain that redirects
+        # to an internal address must not be followed there.
         async with httpx.AsyncClient(timeout=8.0) as client:
             r = await client.get(
-                f"https://{domain}/.well-known/tetapi-verify.txt", follow_redirects=True
+                f"https://{domain}/.well-known/tetapi-verify.txt", follow_redirects=False
             )
             if r.status_code >= 400:
                 return False
