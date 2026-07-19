@@ -64,6 +64,29 @@ Auth via `Authorization: Bearer <JWT|pk_live_…>`; deps in `api/app/api/deps.py
 `POST /claim` (201 + position, 409 idempotent, rate-limit 5/min/IP),
 `GET /claim/stats` (total / pay_ready / pct).
 
+## Universal Tag — `routes/tag.py` (12.5b, `docs/universal-tag.md`, `docs/security.md` B5)
+Anonymous, unauthenticated, public — not under `/api/v1` (registered without a
+prefix, same as `badge.router`).
+- `POST /v1/tag-ping` — beacon fired once per page load by `tag.js` (Part A).
+  Body `{entity_id, page_url, page_title?, referrer?}`. Always `204`, even for
+  an unknown `entity_id` — never discloses whether an entity exists. In-memory
+  IP rate limiter (same pattern as `routes/badge.py`; Redis migration for
+  multi-worker tracked as S-10). On a known published+public entity, appends
+  `page_url` (+ title) to a Redis sorted set `tag_pages:{business_id}`, capped
+  at 200 members via `ZREMRANGEBYRANK`, and increments
+  `tag_impressions:{business_id}` — no new Postgres table, no per-hit DB row
+  (12.5b storage-shape decision: Redis, not a DB table; same (a)/(b) choice as
+  2.4).
+- `GET /wk/{entity_id}/agent.json` — schema.org JSON-LD, same shape `tag.js`
+  injects client-side. Public+published entities only, `404` otherwise.
+- `GET /wk/{entity_id}/agent-card.json` — richer agent-facing payload (trust
+  level, proof/profile URLs, public blocks), mirrors
+  `/businesses/{id}/preview`.
+- `GET /wk/{entity_id}/llms.txt` — plain-text summary, `llms.txt` convention.
+- All three `wk` routes: `Cache-Control: public, max-age=300` (spec: "cache
+  ~5 min"). Reverse-proxied from the entity's own domain via
+  `verify.tetapi.dev` once 12.5c ships the nginx vhost + DNS-record checker.
+
 ## Admin (back office) — `routes/admin.py`, all `require_admin` + audited
 `GET /admin/stats`, `GET /admin/analytics` (GoatCounter traffic bridge, see
 `docs/analytics.md`), `GET /admin/product-metrics` (growth trends, entity_type
