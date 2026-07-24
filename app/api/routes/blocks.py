@@ -113,6 +113,39 @@ async def list_blocks(
     return list(result.scalars().all())
 
 
+@blocks_router.get("/{block_id}", response_model=BlockOut)
+async def get_block(
+    block_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User | None = Depends(_get_optional_user),
+) -> Block:
+    """Public per-block permalink — addressable independent of the parent entity.
+
+    Non-public blocks 404 for everyone except their owner, so this can't be
+    used to enumerate private blocks by guessing IDs.
+    """
+    result = await db.execute(
+        select(Block).where(Block.id == block_id).options(selectinload(Block.media))
+    )
+    block = result.scalar_one_or_none()
+    if not block:
+        raise HTTPException(status_code=404, detail="Block not found")
+
+    if not block.is_public:
+        business = (
+            await db.execute(select(Business).where(Business.id == block.business_id))
+        ).scalar_one_or_none()
+        is_owner = (
+            business is not None
+            and current_user is not None
+            and business.owner_id == current_user.id
+        )
+        if not is_owner:
+            raise HTTPException(status_code=404, detail="Block not found")
+
+    return block
+
+
 @blocks_router.patch("/reorder", status_code=200)
 async def reorder_blocks(
     payload: BlockReorder,

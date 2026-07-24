@@ -9,9 +9,9 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-async def submit_hash(file_bytes: bytes) -> bytes | None:
+async def submit_hash(content_hash: bytes) -> bytes | None:
     """
-    Compute SHA-256 of file and submit to OpenTimestamps calendar.
+    Submit a precomputed SHA-256 digest to the OpenTimestamps calendar.
     Returns the .ots proof bytes, or None on failure.
     """
     try:
@@ -19,8 +19,7 @@ async def submit_hash(file_bytes: bytes) -> bytes | None:
         from opentimestamps.core.timestamp import Timestamp
         from opentimestamps.core.op import OpSHA256
 
-        file_hash = hashlib.sha256(file_bytes).digest()
-        ts = Timestamp(file_hash)
+        ts = Timestamp(content_hash)
 
         # Submit to public OTS calendars
         calendar_urls = [
@@ -52,9 +51,9 @@ async def submit_hash(file_bytes: bytes) -> bytes | None:
         return None
 
 
-async def verify_proof(proof_bytes: bytes, file_bytes: bytes) -> dict:
+async def verify_proof(proof_bytes: bytes, content_hash: bytes) -> dict:
     """
-    Verify an existing .ots proof against a file.
+    Verify an existing .ots proof against a file's precomputed SHA-256 digest.
     Returns {confirmed: bool, bitcoin_block: int | None}.
     """
     try:
@@ -64,7 +63,7 @@ async def verify_proof(proof_bytes: bytes, file_bytes: bytes) -> dict:
 
         buf = io.BytesIO(proof_bytes)
         ctx = StreamDeserializationContext(buf)
-        ts = Timestamp.deserialize(ctx, hashlib.sha256(file_bytes).digest())
+        ts = Timestamp.deserialize(ctx, content_hash)
 
         # Try to upgrade (check Bitcoin confirmation)
         from opentimestamps.calendar import RemoteCalendar
