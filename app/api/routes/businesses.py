@@ -432,6 +432,8 @@ async def public_profile_by_slug(
         media_list = [
             {
                 "type": m.type,
+                "media_url": m.storage_url,
+                "content_hash": m.original_hash,
                 "c2pa_verified": m.c2pa_verified,
                 "captured_at": m.captured_at.isoformat() if m.captured_at else None,
                 "bitcoin_confirmed": m.bitcoin_confirmed,
@@ -487,6 +489,8 @@ async def agent_preview(
         for m in block.media:
             media_list.append({
                 "type": m.type,
+                "media_url": m.storage_url,
+                "content_hash": m.original_hash,
                 "c2pa_verified": m.c2pa_verified,
                 "c2pa_signer": m.c2pa_signer,
                 "captured_at": m.captured_at.isoformat() if m.captured_at else None,

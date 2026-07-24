@@ -28,6 +28,7 @@ class MediaOut(BaseModel):
     id: uuid.UUID
     type: str
     storage_url: str
+    original_hash: str | None
     c2pa_verified: bool
     c2pa_signer: str | None
     bitcoin_confirmed: bool

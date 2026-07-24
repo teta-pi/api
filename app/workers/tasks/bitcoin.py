@@ -8,20 +8,20 @@ logger = logging.getLogger(__name__)
 
 
 @celery_app.task(name="submit_bitcoin_timestamp", bind=True, max_retries=3)
-def submit_bitcoin_timestamp(self, media_id: str, content_hex: str) -> dict:
+def submit_bitcoin_timestamp(self, media_id: str, content_hash_hex: str) -> dict:
     return asyncio.get_event_loop().run_until_complete(
-        _submit_async(media_id, content_hex)
+        _submit_async(media_id, content_hash_hex)
     )
 
 
-async def _submit_async(media_id: str, content_hex: str) -> dict:
+async def _submit_async(media_id: str, content_hash_hex: str) -> dict:
     from sqlalchemy import select
     from app.core.database import AsyncSessionLocal
     from app.models.media import Media
     from app.services.bitcoin import submit_hash
 
-    content = bytes.fromhex(content_hex)
-    proof_bytes = await submit_hash(content)
+    content_hash = bytes.fromhex(content_hash_hex)
+    proof_bytes = await submit_hash(content_hash)
 
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(Media).where(Media.id == uuid.UUID(media_id)))
@@ -53,9 +53,10 @@ async def _check_confirmations_async() -> dict:
 
     confirmed = 0
     for media in pending:
-        if not media.bitcoin_proof:
+        if not media.bitcoin_proof or not media.original_hash:
             continue
-        verification = await verify_proof(media.bitcoin_proof, b"")  # proof-only check
+        content_hash = bytes.fromhex(media.original_hash)
+        verification = await verify_proof(media.bitcoin_proof, content_hash)
         if verification["confirmed"]:
             async with AsyncSessionLocal() as db:
                 result = await db.execute(select(Media).where(Media.id == media.id))

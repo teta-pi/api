@@ -9,7 +9,7 @@ from pathlib import Path
 
 from sqlalchemy.exc import IntegrityError
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -35,10 +35,6 @@ def _save_local(content: bytes, filename: str) -> str:
         return f"local://tetapi-media/{uuid.uuid4()}/{filename}"
 
 
-async def _bitcoin_timestamp_bg(media_id: str, content_hex: str) -> None:
-    """Background bitcoin timestamp — no-op until OTS integration."""
-    logger.info("Bitcoin timestamp queued for media %s (OTS integration pending)", media_id)
-
 from app.api.deps import get_current_user
 from app.core.database import get_db
 from app.core.redis import get_redis
@@ -56,6 +52,7 @@ from app.schemas.media import (
     QRTokenResponse,
 )
 from app.services import c2pa as c2pa_service
+from app.workers.tasks.bitcoin import submit_bitcoin_timestamp
 
 router = APIRouter(prefix="/media", tags=["media"])
 devices_router = APIRouter(prefix="/devices", tags=["devices"])
@@ -81,7 +78,6 @@ async def _get_device(
 
 @router.post("/device-upload", response_model=DeviceMediaUploadResponse)
 async def device_upload_media(
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     manifest_json: str | None = Form(None),
     captured_at: str | None = Form(None),
@@ -148,7 +144,7 @@ async def device_upload_media(
     )
     db.add(media)
     await db.flush()
-    background_tasks.add_task(_bitcoin_timestamp_bg, str(media.id), original_hash)
+    submit_bitcoin_timestamp.delay(str(media.id), original_hash)
 
     return {
         "media_id": media.id,
@@ -164,7 +160,6 @@ async def device_upload_media(
 
 @router.post("/upload", response_model=MediaUploadResponse)
 async def upload_media(
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     block_id: uuid.UUID = Form(...),
     type: str = Form(...),
@@ -206,7 +201,7 @@ async def upload_media(
     )
     db.add(media)
     await db.flush()
-    background_tasks.add_task(_bitcoin_timestamp_bg, str(media.id), original_hash)
+    submit_bitcoin_timestamp.delay(str(media.id), original_hash)
 
     return {
         "media_id": media.id,
