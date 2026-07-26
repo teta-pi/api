@@ -31,7 +31,10 @@ async def submit_hash(content_hash: bytes) -> bytes | None:
         for url in calendar_urls:
             try:
                 cal = calendar_mod.RemoteCalendar(url)
-                cal.submit(ts)
+                # RemoteCalendar.submit() takes the raw digest and returns a
+                # Timestamp attesting to it — merge that into ours, don't pass ts in.
+                remote_ts = cal.submit(content_hash)
+                ts.merge(remote_ts)
                 break
             except Exception as e:
                 logger.warning("OTS calendar %s failed: %s", url, e)
