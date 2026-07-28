@@ -40,6 +40,7 @@ async def twira_resolve(
     entity_types: list[str] | None = None,
     limit: int = 10,
     min_trust: float | None = None,
+    verified_only: bool = True,
 ) -> list[dict]:
     """Returns ranked entities with TWIRA breakdown. Empty list when no
     embeddings exist yet — caller should fall back to keyword resolution."""
@@ -62,6 +63,10 @@ async def twira_resolve(
         stmt = stmt.where(Business.entity_type.in_(entity_types))
     if min_trust is not None:
         stmt = stmt.where(Business.t_score >= min_trust)
+    if verified_only:
+        # Same semantics as the keyword-fallback path (IntentResolver.resolve):
+        # "verified" means any level above "none", not a specific threshold.
+        stmt = stmt.where(Business.verification_level != "none")
     entities = (await db.execute(stmt)).scalars().all()
     if not entities:
         return []

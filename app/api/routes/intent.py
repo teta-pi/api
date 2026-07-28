@@ -57,7 +57,12 @@ async def resolve_intent(
     # TWIRA-ranked pipeline first (SystemSpec v2.1 §04); empty when no
     # embeddings exist yet or the embedding provider is unavailable.
     twira_results = await twira_resolve(
-        db, payload.query, ets, limit=10, min_trust=payload.min_trust
+        db,
+        payload.query,
+        ets,
+        limit=10,
+        min_trust=payload.min_trust,
+        verified_only=payload.verified_only,
     )
     if twira_results:
         results = [
