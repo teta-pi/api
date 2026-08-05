@@ -49,4 +49,17 @@ jobs:
           systemctl is-active --quiet tetapi-api \
             && echo "✓ API up" \
             || { journalctl -u tetapi-api -n 30 --no-pager; exit 1; }
+          # Celery worker + beat run the new code from the same /opt/tetapi/api
+          # tree, so they must restart on every deploy too — otherwise they keep
+          # executing stale task code (see 1.9 OTS calendar bug: 33 min of a
+          # crashing worker because deploy only restarted the API). Always
+          # restart, no file-change detection (cheap: --concurrency=1, small RAM).
+          systemctl restart tetapi-celery-worker tetapi-celery-beat
+          sleep 4
+          systemctl is-active --quiet tetapi-celery-worker \
+            && echo "✓ Celery worker up" \
+            || { journalctl -u tetapi-celery-worker -n 30 --no-pager; exit 1; }
+          systemctl is-active --quiet tetapi-celery-beat \
+            && echo "✓ Celery beat up" \
+            || { journalctl -u tetapi-celery-beat -n 30 --no-pager; exit 1; }
           REMOTE
