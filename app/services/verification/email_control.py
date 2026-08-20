@@ -23,6 +23,23 @@ _redis = aioredis.from_url(settings.redis_url, decode_responses=True)
 _CODE_TTL = 900  # 15 minutes
 _MAX_ATTEMPTS = 5
 
+# Atomic check-and-consume: GET then DEL as two separate awaited calls let
+# two concurrent requests with the same still-valid code both pass the
+# comparison before either delete lands, each recording its own
+# verification_events row (audit #13). Only delete the code from inside the
+# script, and only on a match, so a wrong guess still leaves the code in
+# place for the remaining attempts (unlike a plain GETDEL, which would
+# consume it on the first wrong guess too).
+_CONFIRM_LUA = """
+local stored = redis.call('GET', KEYS[1])
+if not stored then return false end
+if stored == ARGV[1] then
+  redis.call('DEL', KEYS[1])
+  return stored
+end
+return false
+"""
+
 # A personal mailbox doesn't prove control of a brand's own domain.
 _FREE_EMAIL_DOMAINS = {
     "gmail.com", "yahoo.com", "outlook.com", "hotmail.com", "icloud.com",
@@ -68,9 +85,9 @@ async def confirm_email_verification(email: str, code: str) -> bool:
         await _redis.delete(key)
         raise HTTPException(status_code=429, detail="Too many attempts — request a new code")
 
-    stored = await _redis.get(key)
-    if not stored or not secrets.compare_digest(stored, code.strip()):
+    matched = await _redis.eval(_CONFIRM_LUA, 1, key, code.strip())
+    if not matched:
         return False
 
-    await _redis.delete(key, attempts_key)
+    await _redis.delete(attempts_key)
     return True

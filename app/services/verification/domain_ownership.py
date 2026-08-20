@@ -99,6 +99,13 @@ async def _check_file(domain: str, token: str) -> bool:
 
 
 async def check_domain_verification(business_id: str, domain: str) -> tuple[bool, str | None]:
+    """The external DNS/file check itself can't be made atomic with the Redis
+    read (it's a network round-trip in between) — two concurrent checks can
+    both observe the token and both pass. What matters (audit #13) is that
+    only one of them records the verification_events row: DEL is atomic and
+    returns the number of keys actually removed, so only the caller that
+    really deleted the token (the "winner") reports success; a concurrent
+    loser gets `verified=False` rather than writing a duplicate event."""
     domain = normalize_domain(domain)
     key = _redis_key(business_id, domain)
     token = await _redis.get(key)
@@ -106,9 +113,9 @@ async def check_domain_verification(business_id: str, domain: str) -> tuple[bool
         return False, None
 
     if await _check_dns_txt(domain, token):
-        await _redis.delete(key)
-        return True, "dns_txt"
+        claimed = await _redis.delete(key)
+        return bool(claimed), "dns_txt"
     if await _check_file(domain, token):
-        await _redis.delete(key)
-        return True, "file"
+        claimed = await _redis.delete(key)
+        return bool(claimed), "file"
     return False, None

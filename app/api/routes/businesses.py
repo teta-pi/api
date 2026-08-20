@@ -60,7 +60,14 @@ def _event_payload_hash(payload: dict) -> bytes:
 async def _get_owned_business(
     db: AsyncSession, business_id: uuid.UUID, current_user: User
 ) -> Business:
-    result = await db.execute(select(Business).where(Business.id == business_id))
+    # blocks/media eager-loaded so callers can pass this straight into
+    # _compute_verification_level (its docstring requires them pre-loaded —
+    # async SQLAlchemy can't lazy-load outside an awaited context).
+    result = await db.execute(
+        select(Business)
+        .where(Business.id == business_id)
+        .options(selectinload(Business.blocks).selectinload(Block.media))
+    )
     business = result.scalar_one_or_none()
     if not business:
         raise HTTPException(status_code=404, detail="Business not found")
@@ -180,7 +187,7 @@ async def create_business(
 async def list_businesses(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
-) -> list[Business]:
+) -> list[BusinessOut]:
     """List businesses owned by the current user."""
     result = await db.execute(
         select(Business)
@@ -189,9 +196,17 @@ async def list_businesses(
         .order_by(Business.created_at.desc())
     )
     businesses = list(result.scalars().all())
+    # 1.8: compute for the response only — do not assign onto the tracked
+    # ORM instance, or get_db's unconditional end-of-request commit turns
+    # this read into a write (stale reads were the symptom; writing on every
+    # GET was the actual bug). The stored column is kept current by the
+    # write paths that can change it instead (see update_business above).
+    out = []
     for b in businesses:
-        b.verification_level = await _compute_verification_level(db, b)
-    return businesses
+        item = BusinessOut.model_validate(b)
+        item.verification_level = await _compute_verification_level(db, b)
+        out.append(item)
+    return out
 
 
 @router.post("/{business_id}/publish", response_model=BusinessOut)
@@ -214,7 +229,7 @@ async def publish_business(
 async def get_business(
     business_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-) -> Business:
+) -> BusinessOut:
     result = await db.execute(
         select(Business)
         .where(Business.id == business_id)
@@ -224,9 +239,11 @@ async def get_business(
     if not business:
         raise HTTPException(status_code=404, detail="Business not found")
 
-    # Recompute verification level from facts
-    business.verification_level = await _compute_verification_level(db, business)
-    return business
+    # 1.8: same as list_businesses — compute for the response, don't assign
+    # onto the tracked instance (that turns this GET into a DB write).
+    out = BusinessOut.model_validate(business)
+    out.verification_level = await _compute_verification_level(db, business)
+    return out
 
 
 @router.patch("/{business_id}", response_model=BusinessOut)
@@ -240,8 +257,26 @@ async def update_business(
     an explicit, optional method now (POST /{business_id}/verify/registry)."""
     business = await _get_owned_business(db, business_id, current_user)
 
-    for field, value in payload.model_dump(exclude_none=True).items():
+    updates = payload.model_dump(exclude_none=True)
+
+    # A verified badge is a claim about a specific value (this name, this
+    # endpoint) — changing the value invalidates it. Blind setattr below
+    # used to leave both flags true after the value moved out from under
+    # them (1.5 / 1.7, S-7 in docs/security.md). Compare before setattr
+    # applies the new value.
+    if "name" in updates and updates["name"] != business.name:
+        business.registry_status = "unverified"
+    if "agent_endpoint" in updates and updates["agent_endpoint"] != business.agent_endpoint:
+        business.agent_endpoint_verified = False
+
+    for field, value in updates.items():
         setattr(business, field, value)
+
+    # 1.8: persist the derived level reactively on the write that can change
+    # it, instead of relying on the next incidental GET to recompute it (the
+    # old behavior also meant GET requests wrote to the DB — see get_business
+    # below).
+    business.verification_level = await _compute_verification_level(db, business)
 
     await db.flush()
     await db.refresh(business)
@@ -305,6 +340,9 @@ async def confirm_email_verification_endpoint(
             }),
         )
     )
+    # 1.8: this is one of the writes that can actually raise the level
+    # (none -> email) — persist it here rather than waiting for a GET to.
+    business.verification_level = await _compute_verification_level(db, business)
     await db.commit()
     return {"verified": True, "email": payload.email}
 
@@ -350,6 +388,9 @@ async def check_domain_verification_endpoint(
             }),
         )
     )
+    # 1.8: same as email confirm above — persist the level here, it's a real
+    # write that can raise it (none -> domain).
+    business.verification_level = await _compute_verification_level(db, business)
     await db.commit()
     return {"verified": True, "domain": payload.domain, "method": method}
 

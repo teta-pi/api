@@ -1,10 +1,12 @@
+import time
+from collections import defaultdict
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import String, cast, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
@@ -13,6 +15,26 @@ from app.models.business import Business
 from app.models.user import User
 
 router = APIRouter(prefix="/verify-endpoint", tags=["endpoint-verification"])
+
+# Simple in-memory rate limiter, same pattern as /claim, /badge, /tag (audit
+# #7) — this route makes up to two server-side fetches of a caller-supplied
+# URL per call, so it's rate-limited tighter than the public badge endpoint.
+_RATE_LIMIT = 5
+_RATE_WINDOW = 60.0
+_hits: dict[str, list[float]] = defaultdict(list)
+
+
+def _rate_limit(request: Request) -> None:
+    ip = request.headers.get("x-forwarded-for", request.client.host if request.client else "unknown")
+    ip = ip.split(",")[0].strip()
+    now = time.monotonic()
+    window = [t for t in _hits[ip] if now - t < _RATE_WINDOW]
+    if len(window) >= _RATE_LIMIT:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Rate limit exceeded"
+        )
+    window.append(now)
+    _hits[ip] = window
 
 
 class EndpointVerifyRequest(BaseModel):
@@ -74,17 +96,24 @@ async def _verify_consistency(url: str, entity: Business, client: httpx.AsyncCli
 
 @router.post("", response_model=EndpointVerifyResponse)
 async def verify_endpoint(
+    request: Request,
     payload: EndpointVerifyRequest,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> dict:
+    _rate_limit(request)
     entity: Business | None = None
 
     if payload.entity_id:
+        # `.cast("text")` passed a bare Python string where SQLAlchemy
+        # expects a type object, which broke query compilation and 500'd on
+        # every call that included entity_id (known-issues #18) — the only
+        # code path that can ever legitimately set agent_endpoint_verified.
+        # `cast(Business.id, String)` is the same pattern already used in
+        # badge.py's equivalent slug-or-id lookup.
+        id_matches = cast(Business.id, String) == payload.entity_id
         result = await db.execute(
-            select(Business).where(
-                (Business.slug == payload.entity_id) | (Business.id.cast("text") == payload.entity_id)
-            )
+            select(Business).where((Business.slug == payload.entity_id) | id_matches)
         )
         entity = result.scalar_one_or_none()
         if not entity:
