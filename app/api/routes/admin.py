@@ -378,10 +378,29 @@ async def get_user_detail(
 
 # ── Claims ────────────────────────────────────────────────────────────────────
 
+# Outreach status set for the /admin Claims tab (roadmap 11.2). Distinct from
+# the legacy `ready_to_pay` field (retired by 3.5 for new claims).
+CLAIM_OPS_STATUSES = {"contacted", "converted", "rejected"}
+
+
+def _claim_row(c: Claim) -> dict:
+    return {
+        "id": str(c.id),
+        "position": c.position,
+        "email": c.email,
+        "entity_type": c.entity_type,
+        "ready_to_pay": c.ready_to_pay,
+        "ops_status": c.ops_status,
+        "ops_status_updated_at": c.ops_status_updated_at,
+        "source": c.source,
+        "created_at": c.created_at,
+    }
+
 
 @router.get("/claims")
 async def list_claims(
     ready_to_pay: bool | None = Query(default=None),
+    ops_status: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     admin: User = Depends(require_admin),
@@ -392,6 +411,9 @@ async def list_claims(
     if ready_to_pay is not None:
         stmt = stmt.where(Claim.ready_to_pay == ready_to_pay)
         count_stmt = count_stmt.where(Claim.ready_to_pay == ready_to_pay)
+    if ops_status is not None:
+        stmt = stmt.where(Claim.ops_status == ops_status)
+        count_stmt = count_stmt.where(Claim.ops_status == ops_status)
 
     total = (await db.execute(count_stmt)).scalar_one()
     claims = (
@@ -401,19 +423,77 @@ async def list_claims(
     await _audit(db, admin, "claims.list", detail={"offset": offset})
     return {
         "total": total,
-        "results": [
-            {
-                "id": str(c.id),
-                "position": c.position,
-                "email": c.email,
-                "entity_type": c.entity_type,
-                "ready_to_pay": c.ready_to_pay,
-                "source": c.source,
-                "created_at": c.created_at,
-            }
-            for c in claims
-        ],
+        "results": [_claim_row(c) for c in claims],
     }
+
+
+class ClaimStatusUpdate(BaseModel):
+    ops_status: str
+
+
+@router.patch("/claims/{claim_id}")
+async def update_claim_status(
+    claim_id: uuid.UUID,
+    body: ClaimStatusUpdate,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Mark a waitlist claim's outreach status (contacted/converted/rejected)."""
+    if body.ops_status not in CLAIM_OPS_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"ops_status must be one of {sorted(CLAIM_OPS_STATUSES)}",
+        )
+
+    claim = (await db.execute(select(Claim).where(Claim.id == claim_id))).scalar_one_or_none()
+    if not claim:
+        raise HTTPException(status_code=404, detail="Claim not found")
+
+    previous_status = claim.ops_status
+    claim.ops_status = body.ops_status
+    claim.ops_status_updated_at = datetime.utcnow()
+    await db.commit()
+
+    await _audit(
+        db, admin, "claims.status_update", target_type="claim", target_id=str(claim_id),
+        detail={"from": previous_status, "to": body.ops_status},
+    )
+    return _claim_row(claim)
+
+
+@router.get("/claims/export")
+async def export_claims(
+    ops_status: str | None = Query(default=None),
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """CSV export of the waitlist for outreach tooling outside the admin UI."""
+    import csv
+    import io
+
+    from fastapi.responses import StreamingResponse
+
+    stmt = select(Claim).order_by(Claim.position.asc())
+    if ops_status is not None:
+        stmt = stmt.where(Claim.ops_status == ops_status)
+    claims = (await db.execute(stmt)).scalars().all()
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["position", "email", "entity_type", "ops_status", "ops_status_updated_at", "created_at"])
+    for c in claims:
+        writer.writerow([
+            c.position, c.email, c.entity_type, c.ops_status or "",
+            c.ops_status_updated_at.isoformat() if c.ops_status_updated_at else "",
+            c.created_at.isoformat(),
+        ])
+
+    await _audit(db, admin, "claims.export", detail={"ops_status": ops_status, "count": len(claims)})
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=claims_export.csv"},
+    )
 
 
 # ── Entities ──────────────────────────────────────────────────────────────────

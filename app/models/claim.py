@@ -23,3 +23,7 @@ class Claim(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+    # Backoffice outreach tracking (roadmap 11.2). NULL = new/untouched.
+    # Allowed values: contacted, converted, rejected — enforced in the API.
+    ops_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    ops_status_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
