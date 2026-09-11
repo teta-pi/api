@@ -342,18 +342,3 @@ async def get_me(user: User = Depends(get_current_user)) -> dict:
         "has_password": user.hashed_password is not None,
         "has_api_key": user.api_key is not None,
     }
-
-
-@router.post("/agent-key", response_model=Token)
-async def create_agent_key(db: AsyncSession = Depends(get_db)) -> dict:
-    """Create an API key for an AI agent account."""
-    api_key = f"pk_live_{secrets.token_urlsafe(32)}"
-    user = User(
-        email=f"agent-{secrets.token_hex(8)}@teta-pi.agent",
-        auth_provider="api_key",
-        is_agent=True,
-        api_key=api_key,
-    )
-    db.add(user)
-    await db.flush()
-    return {"access_token": create_access_token(str(user.id)), "token_type": "bearer"}
