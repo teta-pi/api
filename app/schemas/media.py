@@ -51,3 +51,14 @@ class DeviceMediaUploadResponse(BaseModel):
     c2pa_signer: str | None
     bitcoin_status: str
     teta_pi_verified: bool = False
+
+
+class DeviceSummary(BaseModel):
+    id: uuid.UUID
+    label: str
+    registered_at: datetime
+
+
+class DeviceListResponse(BaseModel):
+    paired: bool
+    devices: list[DeviceSummary]
