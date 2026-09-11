@@ -64,6 +64,16 @@ class Business(Base):
     verification_level: Mapped[str] = mapped_column(String(50), default="none")
     ai_categories: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
+    # self_registered | pre_verified_unclaimed | claimed | opted_out
+    # (roadmap 1.11 — bulk pre-verification import). Independent of
+    # verification_level/registry_status: a pre-verified row is still L0
+    # ("we know this entity exists from public data", not a verification
+    # chain result) until a real owner claims it.
+    claim_status: Mapped[str] = mapped_column(String(20), default="self_registered")
+    # {github_org?, domain?, npm_package?, pulled_from, imported_at,
+    # opt_out_token} — set at bulk-import time, kept afterwards for provenance.
+    pre_verified_source: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
     # Agent endpoint declared by the entity owner, verified by endpoint_verification module
     agent_endpoint: Mapped[str | None] = mapped_column(String(500), nullable=True)
     agent_endpoint_verified: Mapped[bool] = mapped_column(default=False)

@@ -24,8 +24,11 @@ class VerificationEvent(Base):
     )
     # 'registered' | 'level_up' | 'block_signed' | 'endpoint_verified' | 'reverified'
     # | 'email_verified' | 'domain_verified' | 'document_verified'
+    # | 'pre_verified_imported' | 'claimed' | 'opted_out'
     # (verification rework, docs/verification-rework.md §4 — document_verified
-    # added here as a type only, no backend/upload endpoint yet)
+    # added here as a type only, no backend/upload endpoint yet; the last
+    # three added for roadmap 1.11, bulk pre-verification import — audit
+    # trail only, none of them feed _compute_verification_level)
     event_type: Mapped[str] = mapped_column(String(50), nullable=False)
     level: Mapped[int] = mapped_column(Integer, nullable=False)  # 1 | 2 | 3 at time of event
     # 'official_registry' | 'c2pa_camera' | 'linked_account' | 'self_declared'

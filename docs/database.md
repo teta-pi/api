@@ -18,6 +18,8 @@ Docker container `tetapi-postgres` (image `pgvector/pgvector:pg16`).
 | 009 | `users.token_version` |
 | 010 | `users.avatar_url` |
 | 011 | `businesses.legal_entity_id` (nullable self-FK, brand→legal entity link); asserts append-only trigger from 006 is still attached |
+| 012 | `claims.ops_status` + `ops_status_updated_at` (backoffice outreach tracking) |
+| 013 | `businesses.claim_status` + `pre_verified_source` (bulk pre-verification import, roadmap 1.11) |
 
 ## Core tables
 - **users** — id, email (unique, plaintext for login/index), `full_name`
@@ -29,7 +31,19 @@ Docker container `tetapi-postgres` (image `pgvector/pgvector:pg16`).
   verification_level, agent_endpoint(+verified), is_public, is_published,
   `t_score`, `p_score`, `legal_entity_id?` (self-FK — brand→verified legal
   entity link, e.g. "Google" brand → "Alphabet Inc." legal entity; publicly
-  disclosed on profile), timestamps.
+  disclosed on profile), `claim_status`, `pre_verified_source?`, timestamps.
+  `claim_status` (013, roadmap 1.11): `self_registered` (default, normal
+  `POST /businesses`) | `pre_verified_unclaimed` (bulk-imported by
+  `routes/admin.py::bulk_preverify_entities`, owned by the system account
+  `bulk-import@tetapi.dev`) | `claimed` (real owner proved domain ownership
+  via `routes/businesses.py`'s `/claim/domain/start`+`/check`) | `opted_out`
+  (owner used the one-click `/opt-out` link — unpublished, kept for audit,
+  not deleted). Independent of `verification_level`/`registry_status` —
+  pre-verified is a provenance flag, not a verification-chain result;
+  surfaced on the public page (`by-slug/{slug}/public`'s `claim_status` +
+  `pre_verified_unclaimed` bool) so it's never mistaken for a self-claim.
+  `pre_verified_source` (jsonb, nullable) — `{github_org?, domain?,
+  npm_package?, pulled_from, imported_at, opt_out_token}`, set at import time.
   Since the verification rework (1.3, `docs/verification-rework.md`):
   creation no longer calls the registry — `registry_status` defaults to
   `unverified` and every entity is `is_published=is_public=true` immediately.
@@ -52,9 +66,12 @@ Docker container `tetapi-postgres` (image `pgvector/pgvector:pg16`).
   String(50), no DB-level enum/check constraint — allowed values are
   documented on the model: `registered | level_up | block_signed |
   endpoint_verified | reverified | email_verified | domain_verified |
-  document_verified` (the last three added 011 for the verification rework,
-  see `docs/verification-rework.md`; `document_verified` is type-only for now,
-  no backend/upload endpoint until file-upload risk is handled).
+  document_verified | pre_verified_imported | claimed | opted_out` (the
+  `*_verified` trio added 011 for the verification rework, see
+  `docs/verification-rework.md`; `document_verified` is type-only for now,
+  no backend/upload endpoint until file-upload risk is handled; the last
+  three added 013/roadmap 1.11 — audit trail only, they don't feed
+  `_compute_verification_level`).
 - **endpoint_probes** — entity_id, ok(bool), at. Feeds TWIRA uptime.
 - **admin_audit_log** (append-only) — actor_id/email, action, target_type/id,
   detail(jsonb), created_at. Trigger blocks all UPDATE/DELETE.
