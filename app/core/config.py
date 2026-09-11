@@ -31,6 +31,12 @@ class Settings(BaseSettings):
 
     pi_camera_root_ca_pem: str = ""
 
+    # Public base URLs for links we hand out (profile pages, badges, proofs,
+    # magic links). Profiles live on the Next.js app, badges/proofs on the API
+    # — the bare landing domain serves neither (known-issues §6.6 / 1.23).
+    app_url: str = "https://app.tetapi.dev"
+    api_url: str = "https://api.tetapi.dev"
+
     # C2PA signing — P-256 ECDSA key + certificate chain
     # Set from .env; fallback to certs/ files if env vars are empty
     c2pa_signing_key_pem: str = ""

@@ -5,6 +5,7 @@ from sqlalchemy import String, cast, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.config import settings
 from app.models.business import Business, EntityType
 from app.models.block import Block
 from app.intent_graph.schema import Intent, IntentResolution
@@ -122,7 +123,7 @@ class IntentResolver:
                     agent_endpoint_verified=biz.agent_endpoint_verified,
                     country=biz.country,
                     registry_id=biz.registry_id,
-                    proof_url=f"https://app.tetapi.dev/e/{biz.slug}",
+                    proof_url=f"{settings.app_url}/e/{biz.slug}",
                 )
             )
 

@@ -42,7 +42,7 @@ async def _send_magic_link_email(email: str, token: str) -> None:
     Currently supports: Resend (RESEND_API_KEY in .env).
     Falls back to logging if not configured.
     """
-    magic_url = f"https://app.tetapi.dev/auth/magic?token={token}"
+    magic_url = f"{settings.app_url}/auth/magic?token={token}"
     api_key = getattr(settings, "resend_api_key", "")
 
     if api_key:

@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.routes.businesses import _compute_verification_level
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.redis import get_redis
 from app.models.block import Block
@@ -16,8 +17,6 @@ from app.models.business import Business
 
 router = APIRouter(tags=["tag"])
 
-_APP_URL = "https://app.tetapi.dev"
-_API_URL = "https://api.tetapi.dev"
 _WK_CACHE_CONTROL = "public, max-age=300"  # ~5 min (docs/universal-tag.md §Part B)
 
 # Same in-memory limiter pattern as badge.py (B5, docs/security.md) — generous
@@ -91,11 +90,11 @@ async def tag_ping(
 
 
 def _profile_url(business: Business) -> str:
-    return f"{_APP_URL}/e/{business.slug}"
+    return f"{settings.app_url}/e/{business.slug}"
 
 
 def _proof_url(business: Business) -> str:
-    return f"{_API_URL}/api/v1/businesses/{business.id}/proof"
+    return f"{settings.api_url}/api/v1/businesses/{business.id}/proof"
 
 
 @router.get("/wk/{entity_id}/agent.json")

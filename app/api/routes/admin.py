@@ -15,6 +15,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_admin
+from app.core.config import settings
 from app.core.database import get_db
 from app.models.audit_log import AdminAuditLog
 from app.models.business import Business
@@ -677,9 +678,9 @@ async def bulk_preverify_entities(
         created.append({
             "business_id": str(business.id),
             "slug": business.slug,
-            "profile_url": f"https://tetapi.dev/e/{business.slug}",
-            "opt_out_url": f"https://tetapi.dev/e/{business.slug}/opt-out?token={opt_out_token}",
-            "badge_url": f"https://tetapi.dev/badge/{business.slug}",
+            "profile_url": f"{settings.app_url}/e/{business.slug}",
+            "opt_out_url": f"{settings.app_url}/e/{business.slug}/opt-out?token={opt_out_token}",
+            "badge_url": f"{settings.api_url}/badge/{business.slug}",
         })
 
     await db.commit()
