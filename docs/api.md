@@ -124,6 +124,16 @@ slug. Writes a `pre_verified_imported` verification_event per row plus one
 `profile_url`/`opt_out_url`/`badge_url` (real links, not the placeholders
 `scripts/gtm/outreach_queue.py` in `teta-pi/infra` has been building until
 now) so the outreach queue's `approve` command can stop refusing them.
+Base domains come from `settings.app_url` (`https://app.tetapi.dev` —
+profile + opt-out page) and `settings.api_url` (`https://api.tetapi.dev` —
+`/badge/{slug}`), not literals (1.23; the original 1.11 pointed all three at
+the bare landing domain, which 404s). The same two settings back every other
+outbound link the API mints (`tag.py` well-known files, `intent.py`/
+`intent_graph/resolver.py` `proof_url`, `auth.py` magic link). Note the
+opt-out *page* `app.tetapi.dev/e/{slug}/opt-out` is a frontend route that
+does not exist yet (boot 3 dependency) — the backend it must call is
+`POST /businesses/{business_id}/opt-out?token=…`, resolving the slug via
+`GET /businesses/by-slug/{slug}/public`.
 
 ## Services (`api/app/services/`)
 `ai.py` (OpenAI embeddings + categories), `bitcoin.py` (OpenTimestamps, not

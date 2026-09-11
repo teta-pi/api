@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.database import get_db
 from app.intent_graph.schema import Intent, IntentResolution, TwiraBreakdown
 from app.intent_graph.resolver import IntentResolver
@@ -78,7 +79,7 @@ async def resolve_intent(
                 registry_id=r["entity"].registry_id,
                 twira=TwiraBreakdown(score=r["score"], t=r["t"], i=r["i"], p=r["p"]),
                 first_verified_at=r["first_verified_at"],
-                proof_url=f"https://app.tetapi.dev/e/{r['entity'].slug}",
+                proof_url=f"{settings.app_url}/e/{r['entity'].slug}",
             )
             for r in twira_results
         ]
