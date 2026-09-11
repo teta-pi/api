@@ -49,6 +49,7 @@ class BusinessOut(BaseModel):
     agent_endpoint_verified: bool
     is_public: bool
     is_published: bool
+    claim_status: str
     created_at: datetime
     updated_at: datetime
 
@@ -69,6 +70,7 @@ class BusinessSearchResult(BaseModel):
     ai_categories: dict | None
     agent_endpoint: str | None
     agent_endpoint_verified: bool
+    claim_status: str
 
 
 class AgentBusinessProfile(BaseModel):
@@ -80,4 +82,5 @@ class AgentBusinessProfile(BaseModel):
     trust_level: str
     agent_endpoint: str | None
     agent_endpoint_verified: bool
+    claim_status: str
     blocks: list[dict]

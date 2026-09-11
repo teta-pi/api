@@ -117,6 +117,7 @@ async def search_businesses(
             "ai_categories": biz.ai_categories,
             "agent_endpoint": biz.agent_endpoint,
             "agent_endpoint_verified": biz.agent_endpoint_verified,
+            "claim_status": biz.claim_status,
         })
 
     results.sort(key=lambda r: r["relevance_score"], reverse=True)

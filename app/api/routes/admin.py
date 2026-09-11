@@ -2,12 +2,15 @@
 and records an entry in the append-only admin_audit_log."""
 
 import asyncio
+import hashlib
+import json
+import secrets
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,6 +22,7 @@ from app.models.claim import Claim
 from app.models.user import User
 from app.models.verification_event import VerificationEvent
 from app.services.analytics import get_goatcounter_stats
+from app.api.routes.businesses import _slugify
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -551,6 +555,139 @@ async def list_entities(
             for e, owner_email in rows
         ],
     }
+
+
+# ── Bulk pre-verification import (roadmap 1.11) ────────────────────────────────
+#
+# GTM Phase 2 hard blocker (docs/gtm.md): scripts/gtm/outreach_queue.py (infra
+# repo) refuses to approve any outreach item until profile_url/opt_out_url/
+# badge_url stop being placeholders. This endpoint turns public metadata (the
+# same top-500 dataset scripts/gtm/pull_top500.py already pulls — GitHub org,
+# domain, npm package) into real, live-linkable Business rows.
+#
+# These rows are deliberately NOT a normal entity creation: they're owned by
+# a system account, flagged `claim_status="pre_verified_unclaimed"` (both in
+# the DB and on the public /e/[slug] payload — see
+# routes/businesses.py::public_profile_by_slug), and verification_level stays
+# "none"/L0 — pre-verified means "we know this exists from public data", not
+# a verification-chain result (docs/verification-rework.md). A real owner
+# later proves it via routes/businesses.py's /claim/domain/start+check.
+
+BULK_IMPORT_OWNER_EMAIL = "bulk-import@tetapi.dev"
+
+
+class BulkPreverifyItem(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    entity_type: str = "mcp_server"
+    country: str | None = None
+    description: str | None = None
+    domain: str | None = None
+    github_org: str | None = None
+    npm_package: str | None = None
+
+
+class BulkPreverifyRequest(BaseModel):
+    items: list[BulkPreverifyItem] = Field(min_length=1, max_length=200)
+
+
+async def _get_or_create_bulk_import_owner(db: AsyncSession) -> User:
+    """System account that owns pre-verified-unclaimed rows until a real
+    owner claims them (keeps `businesses.owner_id NOT NULL` intact — no
+    schema change needed — and keeps admin-side owner-joined listings
+    working instead of silently excluding these rows)."""
+    owner = (
+        await db.execute(select(User).where(User.email == BULK_IMPORT_OWNER_EMAIL))
+    ).scalar_one_or_none()
+    if owner:
+        return owner
+    owner = User(
+        email=BULK_IMPORT_OWNER_EMAIL,
+        auth_provider="system",
+        role="user",
+        is_active=True,
+    )
+    db.add(owner)
+    await db.flush()
+    return owner
+
+
+@router.post("/entities/bulk-preverify")
+async def bulk_preverify_entities(
+    body: BulkPreverifyRequest,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Bulk-create pre-verified, unclaimed entity profiles from public
+    metadata. Each item needs at least one public anchor (domain, github_org,
+    or npm_package) — this must never become a way to register an entity
+    from a bare name alone."""
+    owner = await _get_or_create_bulk_import_owner(db)
+
+    created, skipped = [], []
+    for item in body.items:
+        if not (item.domain or item.github_org or item.npm_package):
+            skipped.append({"name": item.name, "reason": "no public anchor (domain/github_org/npm_package)"})
+            continue
+
+        slug = _slugify(item.name)
+        existing = (await db.execute(select(Business).where(Business.slug == slug))).scalar_one_or_none()
+        if existing:
+            skipped.append({
+                "name": item.name, "reason": "slug already exists",
+                "business_id": str(existing.id), "claim_status": existing.claim_status,
+            })
+            continue
+
+        opt_out_token = secrets.token_urlsafe(24)
+        business = Business(
+            owner_id=owner.id,
+            name=item.name,
+            slug=slug,
+            description=item.description,
+            country=item.country,
+            entity_type=item.entity_type,
+            registry_status="unverified",
+            verification_level="none",
+            claim_status="pre_verified_unclaimed",
+            is_published=True,
+            is_public=True,
+            pre_verified_source={
+                "domain": item.domain,
+                "github_org": item.github_org,
+                "npm_package": item.npm_package,
+                "pulled_from": "top500_dataset",
+                "imported_at": datetime.now(timezone.utc).isoformat(),
+                "opt_out_token": opt_out_token,
+            },
+        )
+        db.add(business)
+        await db.flush()
+
+        payload = {"business_id": str(business.id), "imported_at": business.pre_verified_source["imported_at"]}
+        db.add(
+            VerificationEvent(
+                entity_id=business.id,
+                event_type="pre_verified_imported",
+                level=0,
+                source="admin_bulk_import",
+                payload_hash=hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).digest(),
+            )
+        )
+
+        created.append({
+            "business_id": str(business.id),
+            "slug": business.slug,
+            "profile_url": f"https://tetapi.dev/e/{business.slug}",
+            "opt_out_url": f"https://tetapi.dev/e/{business.slug}/opt-out?token={opt_out_token}",
+            "badge_url": f"https://tetapi.dev/badge/{business.slug}",
+        })
+
+    await db.commit()
+    await _audit(
+        db, admin, "entities.bulk_preverify",
+        detail={"requested": len(body.items), "created": len(created), "skipped": len(skipped)},
+    )
+    return {"created": created, "skipped": skipped}
 
 
 # ── GDPR: export + anonymize (A3) ─────────────────────────────────────────────

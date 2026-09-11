@@ -161,8 +161,23 @@ async def create_business(
     registry call here. Registry match is now an explicit, optional
     verification method (POST /{business_id}/verify/registry)."""
     slug = _slugify(payload.name)
-    existing = await db.execute(select(Business).where(Business.slug == slug))
-    if existing.scalar_one_or_none():
+    existing_biz = (await db.execute(select(Business).where(Business.slug == slug))).scalar_one_or_none()
+    if existing_biz:
+        # Roadmap 1.11: don't silently create a duplicate next to a
+        # bulk-imported pre-verified row for the same name — point the real
+        # owner at the claim flow instead (reuses existing slug logic, no
+        # new name-matching heuristics).
+        if existing_biz.claim_status == "pre_verified_unclaimed":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "message": "A pre-verified, unclaimed profile already exists for this name. "
+                    "Claim it instead of creating a duplicate.",
+                    "business_id": str(existing_biz.id),
+                    "slug": existing_biz.slug,
+                    "claim_url": f"/businesses/{existing_biz.id}/claim/domain/start",
+                },
+            )
         slug = f"{slug}-{uuid.uuid4().hex[:6]}"
 
     business = Business(
@@ -174,6 +189,7 @@ async def create_business(
         entity_type=payload.entity_type,
         registry_status="unverified",
         verification_level="none",
+        claim_status="self_registered",
         is_published=True,
         is_public=True,
     )
@@ -436,6 +452,126 @@ async def unlink_legal_entity(
     return {"legal_entity_id": None}
 
 
+async def _get_claimable_business(db: AsyncSession, business_id: uuid.UUID) -> Business:
+    """Unlike _get_owned_business: no owner check — the whole point of the
+    claim flow is that the current owner is the system bulk-import account,
+    not the real one. Gated instead on claim_status."""
+    business = (
+        await db.execute(select(Business).where(Business.id == business_id))
+    ).scalar_one_or_none()
+    if not business:
+        raise HTTPException(status_code=404, detail="Business not found")
+    if business.claim_status != "pre_verified_unclaimed":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Business is not pre-verified-unclaimed (claim_status={business.claim_status})",
+        )
+    return business
+
+
+@router.post("/{business_id}/claim/domain/start")
+async def start_claim_domain_verification(
+    business_id: uuid.UUID,
+    payload: DomainVerifyRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """Real-owner claim path for a pre-verified-unclaimed profile (roadmap
+    1.11): prove domain ownership the same way a normal entity does
+    (docs/verification-rework.md's Domain Ownership method), then transfer
+    ownership on success (see /claim/domain/check). Deliberately reuses the
+    existing domain_ownership service rather than inventing new merge logic —
+    a real, cross-checkable ownership proof, not a name/metadata heuristic."""
+    await _get_claimable_business(db, business_id)
+    return await domain_ownership.start_domain_verification(str(business_id), payload.domain)
+
+
+@router.post("/{business_id}/claim/domain/check")
+async def check_claim_domain_verification(
+    business_id: uuid.UUID,
+    payload: DomainVerifyRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    business = await _get_claimable_business(db, business_id)
+    verified, method = await domain_ownership.check_domain_verification(
+        str(business_id), payload.domain
+    )
+    if not verified:
+        return {"verified": False}
+
+    business.owner_id = current_user.id
+    business.claim_status = "claimed"
+    db.add(
+        VerificationEvent(
+            entity_id=business.id,
+            event_type="domain_verified",
+            level=1,
+            source=method,
+            payload_hash=_event_payload_hash({
+                "domain": payload.domain,
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+            }),
+        )
+    )
+    db.add(
+        VerificationEvent(
+            entity_id=business.id,
+            event_type="claimed",
+            level=1,
+            source=method,
+            payload_hash=_event_payload_hash({
+                "new_owner_id": str(current_user.id),
+                "claimed_at": datetime.now(timezone.utc).isoformat(),
+            }),
+        )
+    )
+    business.verification_level = await _compute_verification_level(db, business)
+    await db.commit()
+    return {"verified": True, "domain": payload.domain, "method": method, "claim_status": business.claim_status}
+
+
+@router.post("/{business_id}/opt-out")
+async def opt_out_pre_verified(
+    business_id: uuid.UUID,
+    token: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """One-click, unauthenticated opt-out for a bulk-imported pre-verified
+    profile (GTM Phase 2 guardrail, docs/gtm.md: "instant opt-out/removal,
+    no form, no waiting"). Gated by the per-entity token minted at import
+    time (see routes/admin.py::bulk_preverify_entities) rather than login,
+    since the point is a real site owner who has never signed up can remove
+    their own snapshot in one click. Unpublishes rather than deletes — keeps
+    the audit trail, matches the append-only discipline used elsewhere."""
+    business = (
+        await db.execute(select(Business).where(Business.id == business_id))
+    ).scalar_one_or_none()
+    if not business:
+        raise HTTPException(status_code=404, detail="Business not found")
+    if business.claim_status != "pre_verified_unclaimed":
+        raise HTTPException(status_code=400, detail="Not an opt-out-eligible profile")
+
+    expected_token = (business.pre_verified_source or {}).get("opt_out_token")
+    if not expected_token or token != expected_token:
+        raise HTTPException(status_code=403, detail="Invalid opt-out token")
+
+    business.claim_status = "opted_out"
+    business.is_published = False
+    business.is_public = False
+    db.add(
+        VerificationEvent(
+            entity_id=business.id,
+            event_type="opted_out",
+            level=0,
+            source="opt_out_link",
+            payload_hash=_event_payload_hash({"opted_out_at": datetime.now(timezone.utc).isoformat()}),
+        )
+    )
+    await db.commit()
+    return {"status": "opted_out"}
+
+
 @router.get("/by-slug/{slug}/public")
 async def public_profile_by_slug(
     slug: str,
@@ -502,6 +638,12 @@ async def public_profile_by_slug(
         "legal_entity": legal_entity,
         "agent_endpoint": business.agent_endpoint,
         "agent_endpoint_verified": business.agent_endpoint_verified,
+        # Roadmap 1.11 — explicit, can't-miss-it flag so a visiting agent or
+        # human never mistakes a bulk-imported public-data snapshot for a
+        # real self-claim. Not to be confused with `trust_level`/registry
+        # verification, which is unaffected (still L0 until claimed).
+        "claim_status": business.claim_status,
+        "pre_verified_unclaimed": business.claim_status == "pre_verified_unclaimed",
         "blocks": blocks,
         "created_at": business.created_at.isoformat(),
     }
@@ -553,6 +695,7 @@ async def agent_preview(
         "trust_level": trust_level,
         "agent_endpoint": business.agent_endpoint,
         "agent_endpoint_verified": business.agent_endpoint_verified,
+        "claim_status": business.claim_status,
         "blocks": blocks,
     }
 
