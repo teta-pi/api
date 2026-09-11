@@ -44,6 +44,7 @@ from app.models.device import Device
 from app.models.media import Media
 from app.models.user import User
 from app.schemas.media import (
+    DeviceListResponse,
     DeviceMediaUploadResponse,
     DeviceRegisterRequest,
     DeviceRegisterResponse,
@@ -278,6 +279,39 @@ async def delete_media(
 
 
 # ── Device registration (QR token flow) ──────────────────────────────────────
+
+
+@devices_router.get("", response_model=DeviceListResponse)
+async def list_devices(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """
+    Paired-status for the caller's business — what `/profile` and the
+    `/claim` onboarding step poll to show "Camera linked" instead of always
+    "Connect Camera", regardless of what actually happened in the Pi CAM app.
+    """
+    result = await db.execute(
+        select(Business).where(Business.owner_id == current_user.id).limit(1)
+    )
+    business = result.scalar_one_or_none()
+    if not business:
+        return {"paired": False, "devices": []}
+
+    devices = (
+        await db.execute(
+            select(Device)
+            .where(Device.business_id == business.id, Device.is_active.is_(True))
+            .order_by(Device.registered_at.desc())
+        )
+    ).scalars().all()
+
+    return {
+        "paired": len(devices) > 0,
+        "devices": [
+            {"id": d.id, "label": d.label, "registered_at": d.registered_at} for d in devices
+        ],
+    }
 
 
 @devices_router.post("/generate-token", response_model=QRTokenResponse)
