@@ -99,6 +99,13 @@ async def verify_endpoint(
     request: Request,
     payload: EndpointVerifyRequest,
     db: AsyncSession = Depends(get_db),
+    # `current_user` is intentionally unused below — this only gates "any
+    # active account", not ownership of `entity`. Since 2026-07-14 (the 1.7
+    # SSRF fix) this made the route unreachable via MCP (known-issues.md:
+    # "teta_verify_endpoint permanently broken, 401 on every call") — MCP has
+    # no auth of its own. Fixed 2026-09 by minting a dedicated service
+    # account's pk_live_ key for the MCP server to authenticate with (see
+    # docs/decisions.md), rather than relaxing this route back to anonymous.
     current_user: User = Depends(get_current_user),
 ) -> dict:
     _rate_limit(request)
