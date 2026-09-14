@@ -1,5 +1,7 @@
 # TETA+PI API
 
+[![CodeQL](https://github.com/teta-pi/api/actions/workflows/codeql.yml/badge.svg)](https://github.com/teta-pi/api/actions/workflows/codeql.yml) [![Bandit](https://github.com/teta-pi/api/actions/workflows/bandit.yml/badge.svg)](https://github.com/teta-pi/api/actions/workflows/bandit.yml) [![Dependency audit](https://github.com/teta-pi/api/actions/workflows/pip-audit.yml/badge.svg)](https://github.com/teta-pi/api/actions/workflows/pip-audit.yml) [![Deploy](https://github.com/teta-pi/api/actions/workflows/deploy.yml/badge.svg)](https://github.com/teta-pi/api/actions/workflows/deploy.yml)
+
 FastAPI backend for **TETA+PI** — Trust Infrastructure for Digital Entities.
 Live at [`api.tetapi.dev`](https://api.tetapi.dev), docs UI at `/docs`.
 
