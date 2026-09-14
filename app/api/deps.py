@@ -11,6 +11,10 @@ from app.models.user import User
 
 security = HTTPBearer()
 
+# Optional bearer: lets anonymous/agent readers through while still identifying
+# the owner. auto_error=False → no Authorization header yields None, not a 403.
+_optional_security = HTTPBearer(auto_error=False)
+
 
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Security(security),
@@ -39,6 +43,25 @@ async def get_current_user(
     if payload.get("ver", 0) != user.token_version:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session expired — sign in again")
     return user
+
+
+async def get_optional_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_optional_security),
+    db: AsyncSession = Depends(get_db),
+) -> User | None:
+    """Resolve the caller if a valid token is present, else None.
+
+    Reuses get_current_user's full logic (API keys, token version) so anonymous
+    and invalid-token requests fall through to the public view instead of 401.
+    Used by every public-by-UUID read (S-8 blocks, S-17 entity row/preview/proof)
+    so the owner sees their private data while everyone else gets the public view.
+    """
+    if credentials is None:
+        return None
+    try:
+        return await get_current_user(credentials, db)
+    except HTTPException:
+        return None
 
 
 async def require_admin(user: User = Depends(get_current_user)) -> User:

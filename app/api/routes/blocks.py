@@ -2,12 +2,11 @@ import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_optional_user
 from app.core.database import get_db
 from app.models.business import Business
 from app.models.block import Block
@@ -18,27 +17,6 @@ from app.services.ai import block_embedding_text, generate_embedding
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/businesses/{business_id}/blocks", tags=["blocks"])
 blocks_router = APIRouter(prefix="/blocks", tags=["blocks"])
-
-# Optional bearer: lets anonymous/agent readers through while still identifying
-# the owner. auto_error=False → no Authorization header yields None, not a 403.
-_optional_security = HTTPBearer(auto_error=False)
-
-
-async def _get_optional_user(
-    credentials: HTTPAuthorizationCredentials | None = Depends(_optional_security),
-    db: AsyncSession = Depends(get_db),
-) -> User | None:
-    """Resolve the caller if a valid token is present, else None.
-
-    Reuses get_current_user's full logic (API keys, token version) so anonymous
-    and invalid-token requests fall through to the public view instead of 401.
-    """
-    if credentials is None:
-        return None
-    try:
-        return await get_current_user(credentials, db)
-    except HTTPException:
-        return None
 
 
 async def _get_owned_business(
@@ -89,7 +67,7 @@ async def add_block(
 async def list_blocks(
     business_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User | None = Depends(_get_optional_user),
+    current_user: User | None = Depends(get_optional_user),
 ) -> list[Block]:
     # The owner sees every block (the profile edit page needs all of them);
     # non-owners and anonymous callers only see is_public blocks.
@@ -100,6 +78,14 @@ async def list_blocks(
         and current_user is not None
         and business.owner_id == current_user.id
     )
+    # S-17: a private/unpublished entity's blocks are not listable by anyone
+    # but the owner — 404 (not 403) so the UUID doesn't confirm existence.
+    if (
+        business is not None
+        and not is_owner
+        and not (business.is_public and business.is_published)
+    ):
+        raise HTTPException(status_code=404, detail="Business not found")
 
     query = (
         select(Block)
@@ -117,12 +103,13 @@ async def list_blocks(
 async def get_block(
     block_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User | None = Depends(_get_optional_user),
+    current_user: User | None = Depends(get_optional_user),
 ) -> Block:
     """Public per-block permalink — addressable independent of the parent entity.
 
-    Non-public blocks 404 for everyone except their owner, so this can't be
-    used to enumerate private blocks by guessing IDs.
+    Non-public blocks (S-8) and any block of a private/unpublished entity
+    (S-17) 404 for everyone except their owner, so this can't be used to
+    enumerate private content by guessing IDs.
     """
     result = await db.execute(
         select(Block).where(Block.id == block_id).options(selectinload(Block.media))
@@ -131,17 +118,17 @@ async def get_block(
     if not block:
         raise HTTPException(status_code=404, detail="Block not found")
 
-    if not block.is_public:
-        business = (
-            await db.execute(select(Business).where(Business.id == block.business_id))
-        ).scalar_one_or_none()
-        is_owner = (
-            business is not None
-            and current_user is not None
-            and business.owner_id == current_user.id
-        )
-        if not is_owner:
-            raise HTTPException(status_code=404, detail="Block not found")
+    business = (
+        await db.execute(select(Business).where(Business.id == block.business_id))
+    ).scalar_one_or_none()
+    is_owner = (
+        business is not None
+        and current_user is not None
+        and business.owner_id == current_user.id
+    )
+    entity_visible = business is not None and business.is_public and business.is_published
+    if not is_owner and not (block.is_public and entity_visible):
+        raise HTTPException(status_code=404, detail="Block not found")
 
     return block
 

@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_optional_user
 from app.core.database import get_db, AsyncSessionLocal
 from app.models.business import Business
 from app.models.block import Block
@@ -74,6 +74,31 @@ async def _get_owned_business(
     if business.owner_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not your business")
     return business
+
+
+async def _get_visible_business(
+    db: AsyncSession, business_id: uuid.UUID, current_user: User | None
+) -> tuple[Business, bool]:
+    """Owner-or-public gate for the by-UUID reads (GET /{id}, /preview, /proof).
+
+    S-17: an entity with is_public=false or is_published=false must not be
+    readable by anyone except its owner — same rule S-8 applied to private
+    blocks. Non-owners (including anonymous) get 404, not 403, so a guessed
+    UUID never confirms that a private entity exists. Returns the entity plus
+    whether the caller owns it, so callers can also hide private blocks.
+    """
+    result = await db.execute(
+        select(Business)
+        .where(Business.id == business_id)
+        .options(selectinload(Business.blocks).selectinload(Block.media))
+    )
+    business = result.scalar_one_or_none()
+    if not business:
+        raise HTTPException(status_code=404, detail="Business not found")
+    is_owner = current_user is not None and business.owner_id == current_user.id
+    if not is_owner and not (business.is_public and business.is_published):
+        raise HTTPException(status_code=404, detail="Business not found")
+    return business, is_owner
 
 
 def _slugify(name: str) -> str:
@@ -245,15 +270,9 @@ async def publish_business(
 async def get_business(
     business_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
 ) -> BusinessOut:
-    result = await db.execute(
-        select(Business)
-        .where(Business.id == business_id)
-        .options(selectinload(Business.blocks).selectinload(Block.media))
-    )
-    business = result.scalar_one_or_none()
-    if not business:
-        raise HTTPException(status_code=404, detail="Business not found")
+    business, _ = await _get_visible_business(db, business_id, current_user)
 
     # 1.8: same as list_businesses — compute for the response, don't assign
     # onto the tracked instance (that turns this GET into a DB write).
@@ -653,21 +672,18 @@ async def public_profile_by_slug(
 async def agent_preview(
     business_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
 ) -> dict:
-    """What AI agents see — structured JSON."""
-    result = await db.execute(
-        select(Business)
-        .where(Business.id == business_id)
-        .options(selectinload(Business.blocks).selectinload(Block.media))
-    )
-    business = result.scalar_one_or_none()
-    if not business:
-        raise HTTPException(status_code=404, detail="Business not found")
+    """What AI agents see — structured JSON. 404 for private entities unless owner."""
+    business, is_owner = await _get_visible_business(db, business_id, current_user)
 
     trust_level = await _compute_verification_level(db, business)
 
     blocks = []
     for block in business.blocks:
+        # Same S-8 rule as /blocks and by-slug: private blocks are owner-only.
+        if not block.is_public and not is_owner:
+            continue
         media_list = []
         for m in block.media:
             media_list.append({
@@ -704,22 +720,19 @@ async def agent_preview(
 async def get_proof(
     business_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
 ) -> dict:
-    """Return cryptographic proofs for independent verification."""
-    result = await db.execute(
-        select(Business)
-        .where(Business.id == business_id)
-        .options(selectinload(Business.blocks).selectinload(Block.media))
-    )
-    business = result.scalar_one_or_none()
-    if not business:
-        raise HTTPException(status_code=404, detail="Business not found")
+    """Cryptographic proofs for independent verification. 404 for private entities unless owner."""
+    business, is_owner = await _get_visible_business(db, business_id, current_user)
 
     registry_data = business.registry_data or {}
     c2pa_proofs = []
     bitcoin_proofs = []
 
     for block in business.blocks:
+        # Media ids of private blocks are owner-only (S-8 rule).
+        if not block.is_public and not is_owner:
+            continue
         for m in block.media:
             if m.c2pa_manifest:
                 import hashlib, json
