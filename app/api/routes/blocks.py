@@ -47,6 +47,8 @@ async def add_block(
         title=payload.title,
         description=payload.description,
         order=payload.order,
+        # 1.22: honour the caller's visibility at creation (was always public).
+        is_public=payload.is_public,
     )
     # Semantic vector for TWIRA I / pgvector search; no-op when no embedding key.
     # Embedding is best-effort: a provider outage/quota error must not block block creation.
