@@ -1,0 +1,33 @@
+name: Tests (pytest)
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      # The 1.22 suite is unit-level: add_block is called with a stub session
+      # and the owner check + embedding patched out, so no Postgres/Redis is
+      # needed (tests/test_blocks_is_public.py). Installing the project with its
+      # dev extras is enough — runner-side only, zero load on the droplet.
+      - name: Install project + dev dependencies
+        run: pip install ".[dev]"
+
+      - name: Run pytest
+        run: pytest -q
