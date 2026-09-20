@@ -57,8 +57,14 @@ class DeviceSummary(BaseModel):
     id: uuid.UUID
     label: str
     registered_at: datetime
+    revoked_at: datetime | None = None  # 1.25 — set once the key is killed
 
 
 class DeviceListResponse(BaseModel):
     paired: bool
     devices: list[DeviceSummary]
+
+
+class DeviceRevokeResponse(BaseModel):
+    device_id: uuid.UUID
+    revoked_at: datetime
