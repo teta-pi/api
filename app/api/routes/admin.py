@@ -941,3 +941,45 @@ async def list_audit_log(
             for r in rows
         ],
     }
+
+
+# ── Devices (Pi CAM) — kill switch (1.25) ─────────────────────────────────────
+
+
+@router.delete("/devices/{device_id}")
+async def admin_revoke_device(
+    device_id: uuid.UUID,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Support kill switch for a paired Pi CAM whose owner can't reach the
+    self-serve paths (lost phone *and* lost account access). Same effect as
+    the owner's `DELETE /devices/{id}` — key erased, `revoked_at` stamped,
+    `device_revoked` verification_event (source 'admin') — plus the
+    mandatory admin_audit_log entry. Idempotent."""
+    from app.api.routes.media import _revoke_device
+    from app.models.device import Device
+
+    device = (
+        await db.execute(select(Device).where(Device.id == device_id))
+    ).scalar_one_or_none()
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    did_revoke = _revoke_device(db, device, source="admin")
+    await db.flush()
+    await _audit(
+        db, admin, "devices.revoke",
+        target_type="device", target_id=str(device_id),
+        detail={
+            "business_id": str(device.business_id),
+            "label": device.label,
+            "already_revoked": not did_revoke,
+            "revoked_at": device.revoked_at.isoformat() if device.revoked_at else None,
+        },
+    )
+    return {
+        "device_id": device.id,
+        "revoked_at": device.revoked_at,
+        "already_revoked": not did_revoke,
+    }

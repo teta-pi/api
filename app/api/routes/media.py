@@ -43,11 +43,13 @@ from app.models.business import Business
 from app.models.device import Device
 from app.models.media import Media
 from app.models.user import User
+from app.models.verification_event import VerificationEvent
 from app.schemas.media import (
     DeviceListResponse,
     DeviceMediaUploadResponse,
     DeviceRegisterRequest,
     DeviceRegisterResponse,
+    DeviceRevokeResponse,
     MediaUploadResponse,
     MediaVerifyResponse,
     QRTokenResponse,
@@ -68,13 +70,51 @@ async def _get_device(
     x_device_api_key: str = Header(..., alias="X-Device-Api-Key"),
     db: AsyncSession = Depends(get_db),
 ) -> Device:
-    result = await db.execute(
-        select(Device).where(Device.api_key == x_device_api_key, Device.is_active.is_(True))
-    )
+    result = await db.execute(select(Device).where(Device.api_key == x_device_api_key))
     device = result.scalar_one_or_none()
-    if not device:
+    # Revocation (1.25) is checked in Python, not only in the WHERE clause, so
+    # a revoked/inactive row is rejected even if a future query regresses —
+    # and so the unit test can assert it without Postgres.
+    if not device or not device.is_active or device.revoked_at is not None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid device key")
     return device
+
+
+def _event_payload_hash(payload: dict) -> bytes:
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).digest()
+
+
+def _revoke_device(db: AsyncSession, device: Device, source: str) -> bool:
+    """Kill a device's upload credential (1.25 / known-issues 6.6b).
+
+    Keeps the row (media provenance + fingerprint uniqueness for a later
+    re-pair) but erases the secret: `api_key=NULL`, `is_active=False`,
+    `revoked_at=now`. Appends a `device_revoked` verification_event (level 0,
+    source 'owner' | 'device' | 'admin') as the append-only trail. Idempotent:
+    an already-revoked device is left untouched and no second event is
+    written. Returns True if this call did the revocation.
+    """
+    if device.revoked_at is not None:
+        return False
+    now = datetime.now(timezone.utc)
+    device.api_key = None
+    device.is_active = False
+    device.revoked_at = now
+    db.add(
+        VerificationEvent(
+            entity_id=device.business_id,
+            event_type="device_revoked",
+            level=0,
+            source=source,
+            payload_hash=_event_payload_hash({
+                "device_id": str(device.id),
+                "device_fingerprint": device.device_fingerprint,
+                "source": source,
+                "revoked_at": now.isoformat(),
+            }),
+        )
+    )
+    return True
 
 
 @router.post("/device-upload", response_model=DeviceMediaUploadResponse)
@@ -298,20 +338,73 @@ async def list_devices(
     if not business:
         return {"paired": False, "devices": []}
 
+    # Revoked devices are returned too (with `revoked_at` set) so the UI can
+    # show state honestly; only live ones count towards `paired`.
     devices = (
         await db.execute(
             select(Device)
-            .where(Device.business_id == business.id, Device.is_active.is_(True))
+            .where(Device.business_id == business.id)
             .order_by(Device.registered_at.desc())
         )
     ).scalars().all()
 
     return {
-        "paired": len(devices) > 0,
+        "paired": any(d.is_active and d.revoked_at is None for d in devices),
         "devices": [
-            {"id": d.id, "label": d.label, "registered_at": d.registered_at} for d in devices
+            {
+                "id": d.id,
+                "label": d.label,
+                "registered_at": d.registered_at,
+                "revoked_at": d.revoked_at,
+            }
+            for d in devices
         ],
     }
+
+
+@devices_router.delete("/{device_id}", response_model=DeviceRevokeResponse)
+async def revoke_device(
+    device_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """
+    Owner-side revocation (1.25): kills the device's X-Device-Api-Key for good.
+    Same owner check as `_get_owned_business` — a device that isn't yours is
+    indistinguishable from one that doesn't exist (404, no existence oracle).
+    Idempotent: revoking twice returns the original `revoked_at`.
+    """
+    result = await db.execute(
+        select(Device, Business.owner_id)
+        .join(Business, Device.business_id == Business.id)
+        .where(Device.id == device_id)
+    )
+    row = result.one_or_none()
+    if not row or row[1] != current_user.id:
+        raise HTTPException(status_code=404, detail="Device not found")
+    device = row[0]
+    _revoke_device(db, device, source="owner")
+    await db.flush()
+    return {"device_id": device.id, "revoked_at": device.revoked_at}
+
+
+@devices_router.post("/self-revoke", response_model=DeviceRevokeResponse)
+async def self_revoke_device(
+    device: Device = Depends(_get_device),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """
+    Device-side revocation (1.25) — what the Pi CAM app's "Unlink" calls
+    before wiping its local keys. The phone has no owner JWT, only its own
+    X-Device-Api-Key, and that key identifies exactly one device, so by
+    construction it can only ever revoke itself (no id in the path or body
+    to get wrong). Kept as its own route rather than a second auth mode on
+    `DELETE /devices/{id}` so the owner route's auth model stays
+    single-scheme and the device route stays symmetric with `/register`.
+    """
+    _revoke_device(db, device, source="device")
+    await db.flush()
+    return {"device_id": device.id, "revoked_at": device.revoked_at}
 
 
 @devices_router.post("/generate-token", response_model=QRTokenResponse)
@@ -376,6 +469,11 @@ async def register_device(
     if device:
         device.device_public_key = payload.device_public_key
         device.is_active = True
+        # A revoked device re-pairing (fresh QR from the owner's session) gets
+        # a brand-new key — the old one was erased on revocation (1.25).
+        if device.revoked_at is not None or not device.api_key:
+            device.api_key = f"pk_live_{secrets.token_urlsafe(32)}"
+            device.revoked_at = None
         await db.flush()
     else:
         api_key = f"pk_live_{secrets.token_urlsafe(32)}"
