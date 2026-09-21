@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
 from app.core.database import get_db
+from app.core.ssrf import assert_safe_url
 from app.models.business import Business
 from app.models.user import User
 
@@ -53,10 +54,14 @@ class EndpointVerifyResponse(BaseModel):
 
 
 async def _verify_active(url: str, client: httpx.AsyncClient) -> bool:
-    """Check that the endpoint responds with 2xx."""
+    """Check that the endpoint responds with 2xx.
+
+    `follow_redirects=False` (S-16): a public URL that 302s to an internal
+    address must not be chased there — a 3xx is treated as not-active. The URL
+    itself is already SSRF-validated by `assert_safe_url` at the route entry."""
     try:
-        r = await client.get(url, timeout=8.0, follow_redirects=True)
-        return r.status_code < 400
+        r = await client.get(url, timeout=8.0, follow_redirects=False)
+        return r.status_code < 300
     except Exception:
         return False
 
@@ -82,8 +87,8 @@ async def _verify_consistency(url: str, entity: Business, client: httpx.AsyncCli
     Sprint 1: loose match on entity name. Sprint 2: structured schema validation.
     """
     try:
-        r = await client.get(url, timeout=8.0, follow_redirects=True)
-        if r.status_code >= 400:
+        r = await client.get(url, timeout=8.0, follow_redirects=False)
+        if r.status_code >= 300:
             return False
         data = r.json()
         endpoint_name = (data.get("name") or data.get("entity_name") or "").lower()
@@ -109,6 +114,10 @@ async def verify_endpoint(
     current_user: User = Depends(get_current_user),
 ) -> dict:
     _rate_limit(request)
+    # S-16: validate the caller-supplied URL BEFORE any server-side fetch —
+    # scheme, no-literal-IP, public-resolving host, port 80/443. Raises 400.
+    # Both fetches below use this same validated URL. (docs/security.md §4/S-16)
+    assert_safe_url(payload.endpoint_url)
     entity: Business | None = None
 
     if payload.entity_id:
