@@ -641,6 +641,12 @@ async def public_profile_by_slug(
 
     rd = business.registry_data or {}
     return {
+        # 3.24: the /e/[slug]/opt-out page (and any id-keyed follow-up like
+        # /claim/domain/*) needs the entity id, and this is the only public
+        # slug→entity lookup. Not a new exposure — /search already returns
+        # `id` for every public entity, and this route is already gated on
+        # is_published+is_public.
+        "id": str(business.id),
         "name": business.name,
         "slug": business.slug,
         "entity_type": business.entity_type,
