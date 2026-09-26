@@ -26,10 +26,37 @@ _DOH_URL = "https://cloudflare-dns.com/dns-query"
 
 
 def normalize_domain(raw: str) -> str:
+    """Canonical host form. Used both as the Redis token key and — since S-22
+    — as the key the claimed domain is compared to the entity's anchor with,
+    deliberately the *same* helper so the domain a token was minted for and
+    the domain matched against the anchor can never disagree. Strips scheme,
+    userinfo, port, path, `www.`, a trailing root dot, and folds an IDN to
+    punycode; case-insensitive."""
     raw = raw.strip().lower()
     if "://" in raw:
         raw = urlparse(raw).netloc or raw
-    return raw.split("/")[0].split(":")[0]
+    host = raw.split("/")[0].split("@")[-1].split(":")[0].rstrip(".")
+    if host.startswith("www."):
+        host = host[4:]
+    try:
+        # stdlib idna codec: "bücher.de" -> "xn--bcher-kva.de"; already-ASCII
+        # hosts come back unchanged. Raises on an empty/over-long label —
+        # then keep the literal, so a bad input fails the match rather than
+        # the request.
+        host = host.encode("idna").decode("ascii")
+    except (UnicodeError, UnicodeDecodeError):
+        pass
+    return host
+
+
+def anchor_domain(pre_verified_source: dict | None) -> str | None:
+    """The domain a bulk-imported entity is *anchored* to — the one
+    `admin.py::bulk_preverify_entities` recorded from public data — in
+    normalized form. `None` when the entity was imported with only a
+    `github_org`/`npm_package` anchor: there is then nothing a domain proof
+    could be tied to, and a domain claim must be refused (S-22)."""
+    raw = (pre_verified_source or {}).get("domain")
+    return normalize_domain(raw) if raw else None
 
 
 def _redis_key(business_id: str, domain: str) -> str:
