@@ -403,7 +403,18 @@ async def check_domain_verification_endpoint(
     current_user: User = Depends(get_current_user),
 ) -> dict:
     """Domain Ownership, step 2 — check the DNS TXT record or well-known file
-    and record the (append-only) verification event on success."""
+    and record the (append-only) verification event on success.
+
+    Deliberately NOT anchor-bound, unlike /claim/domain/check (S-22): here the
+    caller already owns the entity, so there is no takeover — only possible
+    trust-inflation (marking your entity "domain_verified" against an unrelated
+    domain you hold). Binding it needs something to bind *to*: `businesses` has
+    no declared-domain column, and the public payload only says
+    `verification_level=domain` without saying which domain — so the real fix
+    is "entity declares its domain + we disclose the verified one", a schema +
+    payload task, not a check bolted on here. Multi-domain owners (example.com
+    and example.de) are legitimate, so guessing an anchor would reject honest
+    proofs. Tracked in docs/security.md S-22 as a conscious deferral."""
     business = await _get_owned_business(db, business_id, current_user)
     verified, method = await domain_ownership.check_domain_verification(
         str(business_id), payload.domain
@@ -488,6 +499,44 @@ async def _get_claimable_business(db: AsyncSession, business_id: uuid.UUID) -> B
     return business
 
 
+def _assert_claim_domain_matches_anchor(business: Business, domain: str) -> str:
+    """S-22: a claim must prove control of the domain the entity is *anchored*
+    to (the one bulk-import recorded from public data), not of whatever domain
+    the caller happens to own — otherwise any signed-up user takes over any
+    `pre_verified_unclaimed` profile by proving a throwaway domain of their
+    own, and the `claim_status` gate buys us nothing.
+
+    Exact match on the normalized host. A subdomain is deliberately NOT
+    accepted in either direction: accepting `sub.anchor` would let any tenant
+    of a shared host (`*.github.io`, `*.vercel.app`, a university's
+    departments) claim the apex's entity, and accepting a parent would let
+    that host's operator claim every tenant — and telling the two apart needs
+    a public-suffix list we don't carry. `www.` and case/port/scheme noise is
+    already folded by `normalize_domain`, so the honest owner isn't tripped by
+    it. Returns the normalized anchor."""
+    anchor = domain_ownership.anchor_domain(business.pre_verified_source)
+    if not anchor:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "This profile has no domain anchor — it was imported from a GitHub "
+                "organisation or npm package only, so control of a domain proves "
+                "nothing about it and it cannot be claimed this way. Contact "
+                "hello@tetapi.dev to claim it."
+            ),
+        )
+    if domain_ownership.normalize_domain(domain) != anchor:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"This profile is anchored to {anchor} — prove control of {anchor} "
+                f"itself (not a subdomain, not another domain) to claim it. If the "
+                f"anchor is wrong, contact hello@tetapi.dev."
+            ),
+        )
+    return anchor
+
+
 @router.post("/{business_id}/claim/domain/start")
 async def start_claim_domain_verification(
     business_id: uuid.UUID,
@@ -500,8 +549,13 @@ async def start_claim_domain_verification(
     (docs/verification-rework.md's Domain Ownership method), then transfer
     ownership on success (see /claim/domain/check). Deliberately reuses the
     existing domain_ownership service rather than inventing new merge logic —
-    a real, cross-checkable ownership proof, not a name/metadata heuristic."""
-    await _get_claimable_business(db, business_id)
+    a real, cross-checkable ownership proof, not a name/metadata heuristic.
+
+    The anchor match (S-22) is enforced here too, not only at /check: no point
+    minting DNS instructions for a domain that can never complete the claim,
+    and the caller gets the honest 403 before touching their DNS."""
+    business = await _get_claimable_business(db, business_id)
+    _assert_claim_domain_matches_anchor(business, payload.domain)
     return await domain_ownership.start_domain_verification(str(business_id), payload.domain)
 
 
@@ -512,7 +566,10 @@ async def check_claim_domain_verification(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> dict:
+    """Transfers ownership on a successful proof — so the proven domain must be
+    the entity's anchor, checked *before* the proof is even looked at (S-22)."""
     business = await _get_claimable_business(db, business_id)
+    _assert_claim_domain_matches_anchor(business, payload.domain)
     verified, method = await domain_ownership.check_domain_verification(
         str(business_id), payload.domain
     )
