@@ -12,6 +12,7 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_optional_user
+from app.core.config import settings
 from app.core.database import get_db, AsyncSessionLocal
 from app.models.business import Business
 from app.models.block import Block
@@ -112,7 +113,10 @@ async def _compute_verification_level(db: AsyncSession, business: Business) -> s
     """Derived, not stored: reflects whichever independent method (registry,
     email, domain) — or media provenance — currently holds for this entity.
     `business.blocks`/`.media` must already be loaded by the caller."""
-    has_c2pa = any(
+    # Gated on the config flag, not just the stored column: real C2PA
+    # verification isn't implemented yet (known-issues §6.8) — see
+    # app/core/config.py::c2pa_verification_enabled.
+    has_c2pa = settings.c2pa_verification_enabled and any(
         m.c2pa_verified
         for block in business.blocks
         for m in block.media
@@ -687,7 +691,11 @@ async def public_profile_by_slug(
                 "type": m.type,
                 "media_url": m.storage_url,
                 "content_hash": m.original_hash,
-                "c2pa_verified": m.c2pa_verified,
+                # Gated on the flag, not just the stored column (known-issues
+                # §6.8) — c2pa_verified never proved anything, see
+                # app/core/config.py::c2pa_verification_enabled.
+                "c2pa_verified": bool(m.c2pa_verified) and settings.c2pa_verification_enabled,
+                "device_upload": block.title == "Pi CAM Captures",
                 "captured_at": m.captured_at.isoformat() if m.captured_at else None,
                 "bitcoin_confirmed": m.bitcoin_confirmed,
                 "bitcoin_block": m.bitcoin_block,
@@ -753,8 +761,12 @@ async def agent_preview(
                 "type": m.type,
                 "media_url": m.storage_url,
                 "content_hash": m.original_hash,
-                "c2pa_verified": m.c2pa_verified,
-                "c2pa_signer": m.c2pa_signer,
+                # Gated on the flag, not just the stored column (known-issues
+                # §6.8) — c2pa_verified never proved anything, see
+                # app/core/config.py::c2pa_verification_enabled.
+                "c2pa_verified": bool(m.c2pa_verified) and settings.c2pa_verification_enabled,
+                "c2pa_signer": m.c2pa_signer if settings.c2pa_verification_enabled else None,
+                "device_upload": block.title == "Pi CAM Captures",
                 "captured_at": m.captured_at.isoformat() if m.captured_at else None,
                 "bitcoin_confirmed": m.bitcoin_confirmed,
                 "bitcoin_block": m.bitcoin_block,
@@ -797,7 +809,11 @@ async def get_proof(
         if not block.is_public and not is_owner:
             continue
         for m in block.media:
-            if m.c2pa_manifest:
+            # A stored manifest alone proves nothing — it's a client-supplied
+            # form field, not a verified signature (known-issues §6.8). Only
+            # list it as a proof once c2pa_verification_enabled is True and
+            # the row itself passed verification.
+            if m.c2pa_manifest and m.c2pa_verified and settings.c2pa_verification_enabled:
                 import hashlib, json
                 c2pa_proofs.append({
                     "media_id": str(m.id),

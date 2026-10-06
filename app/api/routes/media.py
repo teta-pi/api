@@ -36,6 +36,7 @@ def _save_local(content: bytes, filename: str) -> str:
 
 
 from app.api.deps import get_current_user
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.redis import get_redis
 from app.models.block import Block
@@ -138,7 +139,14 @@ async def device_upload_media(
     c2pa_signer = None
     teta_pi_verified = False
 
-    if manifest:
+    if not settings.c2pa_verification_enabled:
+        if manifest:
+            logger.info(
+                "C2PA verification disabled (c2pa_verification_enabled=False) — "
+                "manifest stored for device %s but c2pa_verified left False",
+                device.id,
+            )
+    elif manifest:
         c2pa_verified, c2pa_signer = c2pa_service.verify_pi_camera_signature(manifest)
         if c2pa_verified:
             manifest = c2pa_service.add_teta_pi_countersignature(manifest)
@@ -216,7 +224,7 @@ async def upload_media(
     c2pa_verified = False
     c2pa_signer = None
 
-    if manifest:
+    if settings.c2pa_verification_enabled and manifest:
         c2pa_verified, c2pa_signer = c2pa_service.verify_pi_camera_signature(manifest)
         if c2pa_verified:
             manifest = c2pa_service.add_teta_pi_countersignature(manifest)
@@ -276,10 +284,15 @@ async def verify_media(
     if not media:
         raise HTTPException(status_code=404, detail="Media not found")
 
+    # Gate on the config flag, not just the stored column: real C2PA
+    # verification isn't implemented yet (known-issues §6.8), so a historical
+    # True row must not be served as "verified" until task B lands.
+    c2pa_verified = media.c2pa_verified and settings.c2pa_verification_enabled
+
     return {
         "media_id": media.id,
-        "c2pa_verified": media.c2pa_verified,
-        "c2pa_verified_at": media.uploaded_at if media.c2pa_verified else None,
+        "c2pa_verified": c2pa_verified,
+        "c2pa_verified_at": media.uploaded_at if c2pa_verified else None,
         "bitcoin_status": "confirmed" if media.bitcoin_confirmed else "pending",
         "bitcoin_block": media.bitcoin_block,
         "bitcoin_confirmed_at": None,
