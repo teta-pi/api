@@ -43,6 +43,14 @@ class Settings(BaseSettings):
     c2pa_signing_cert_pem: str = ""
     c2pa_root_ca_pem: str = ""
 
+    # Gate for claiming C2PA verification happened (known-issues §6.8). False
+    # until real manifest verification (c2pa-python, cert-chain validation) is
+    # in place — today verify_pi_camera_signature() is a substring match on a
+    # client-supplied manifest_json, so it proves nothing about the file.
+    # Flip to True only once that work (docs/verification-rework.md "task B")
+    # ships; until then every upload path must leave c2pa_verified False.
+    c2pa_verification_enabled: bool = False
+
     # Self-hosted GoatCounter analytics — read-only SQLite bridge for the
     # Back Office Analytics tab. See docs/analytics.md.
     goatcounter_db_path: str = "/opt/goatcounter/db/goatcounter.sqlite3"

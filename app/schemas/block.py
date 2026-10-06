@@ -31,6 +31,7 @@ class MediaOut(BaseModel):
     original_hash: str | None
     c2pa_verified: bool
     c2pa_signer: str | None
+    device_upload: bool = False
     bitcoin_confirmed: bool
     bitcoin_block: int | None
     uploaded_at: datetime

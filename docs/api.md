@@ -66,6 +66,13 @@ Auth via `Authorization: Bearer <JWT|pk_live_…>`; deps in `api/app/api/deps.py
 - `routes/blocks.py` — block CRUD, owner-checked via parent business.
 - `routes/media.py` — `/media/upload` (JWT), `/media/device-upload` (api_key),
   local storage under `UPLOAD_DIR`, served at `/media/local/{id}/{name}`.
+  `c2pa_verified` is gated behind `settings.c2pa_verification_enabled` (default
+  `False`, `app/core/config.py`) — until real C2PA manifest verification
+  exists, `verify_pi_camera_signature()` is only a substring match on a
+  client-supplied `manifest_json` field and proves nothing, so every upload
+  path and every public read (`by-slug/public`, `/preview`, `/proof`,
+  `/media/{id}/verify`, `verification_level`) forces the flag `False`
+  regardless of the stored column (security.md S-26, known-issues §6.8).
 
 ## Search & intent
 - `routes/search.py` — `/search` keyword+level search over published entities.

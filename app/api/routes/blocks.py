@@ -7,16 +7,50 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_optional_user
+from app.core.config import settings
 from app.core.database import get_db
 from app.models.business import Business
 from app.models.block import Block
 from app.models.user import User
-from app.schemas.block import BlockCreate, BlockOut, BlockReorder, BlockUpdate
+from app.schemas.block import BlockCreate, BlockOut, BlockReorder, BlockUpdate, MediaOut
 from app.services.ai import block_embedding_text, generate_embedding
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/businesses/{business_id}/blocks", tags=["blocks"])
 blocks_router = APIRouter(prefix="/blocks", tags=["blocks"])
+
+
+def _block_out(block: Block) -> BlockOut:
+    """Gate c2pa_verified/c2pa_signer on the config flag, not just the stored
+    column (known-issues §6.8, security.md S-26): real C2PA verification
+    isn't implemented yet, so a stored True must never be served as fact.
+    `device_upload` is the honest, trust-free alternative — it only says the
+    media arrived via a paired device's upload endpoint."""
+    return BlockOut(
+        id=block.id,
+        business_id=block.business_id,
+        title=block.title,
+        description=block.description,
+        order=block.order,
+        is_public=block.is_public,
+        verification_status=block.verification_status,
+        created_at=block.created_at,
+        media=[
+            MediaOut(
+                id=m.id,
+                type=m.type,
+                storage_url=m.storage_url,
+                original_hash=m.original_hash,
+                c2pa_verified=bool(m.c2pa_verified) and settings.c2pa_verification_enabled,
+                c2pa_signer=m.c2pa_signer if settings.c2pa_verification_enabled else None,
+                device_upload=block.title == "Pi CAM Captures",
+                bitcoin_confirmed=m.bitcoin_confirmed,
+                bitcoin_block=m.bitcoin_block,
+                uploaded_at=m.uploaded_at,
+            )
+            for m in block.media
+        ],
+    )
 
 
 async def _get_owned_business(
@@ -70,7 +104,7 @@ async def list_blocks(
     business_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     current_user: User | None = Depends(get_optional_user),
-) -> list[Block]:
+) -> list[BlockOut]:
     # The owner sees every block (the profile edit page needs all of them);
     # non-owners and anonymous callers only see is_public blocks.
     result = await db.execute(select(Business).where(Business.id == business_id))
@@ -98,7 +132,7 @@ async def list_blocks(
     if not is_owner:
         query = query.where(Block.is_public.is_(True))
     result = await db.execute(query)
-    return list(result.scalars().all())
+    return [_block_out(b) for b in result.scalars().all()]
 
 
 @blocks_router.get("/{block_id}", response_model=BlockOut)
@@ -106,7 +140,7 @@ async def get_block(
     block_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     current_user: User | None = Depends(get_optional_user),
-) -> Block:
+) -> BlockOut:
     """Public per-block permalink — addressable independent of the parent entity.
 
     Non-public blocks (S-8) and any block of a private/unpublished entity
@@ -132,7 +166,7 @@ async def get_block(
     if not is_owner and not (block.is_public and entity_visible):
         raise HTTPException(status_code=404, detail="Block not found")
 
-    return block
+    return _block_out(block)
 
 
 @blocks_router.patch("/reorder", status_code=200)
