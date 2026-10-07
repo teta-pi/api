@@ -23,6 +23,12 @@ class Media(Base):
     c2pa_verified: Mapped[bool] = mapped_column(Boolean, default=False)
     c2pa_signer: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
+    # 1.29 — real signal: did the device's ECDSA key actually sign this
+    # file's content? Independent of (and not a substitute for) c2pa_verified,
+    # which stays gated off until real C2PA manifest verification exists
+    # (known-issues §6.8). False on upload failure/absence, never blocks it.
+    device_signature_verified: Mapped[bool] = mapped_column(Boolean, default=False)
+
     bitcoin_proof: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     bitcoin_confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
     bitcoin_block: Mapped[int | None] = mapped_column(Integer, nullable=True)

@@ -72,7 +72,14 @@ Auth via `Authorization: Bearer <JWT|pk_live_…>`; deps in `api/app/api/deps.py
   client-supplied `manifest_json` field and proves nothing, so every upload
   path and every public read (`by-slug/public`, `/preview`, `/proof`,
   `/media/{id}/verify`, `verification_level`) forces the flag `False`
-  regardless of the stored column (security.md S-26, known-issues §6.8).
+  regardless of the stored column (security.md S-27, known-issues §6.8).
+  Separately, `device_signature_verified` (1.29) is a real, independently
+  checked signal — the device's own ECDSA P-256 key signed the uploaded
+  file's content (`content_signature`/`signature_alg` form fields,
+  `app/services/device_signature.py`) — and is not gated or blended with
+  `c2pa_verified`; see the infra `docs/api.md` contract section for the full
+  write-up. `POST /devices/register` now rejects a non-P-256-SPKI
+  `device_public_key` with `400`.
 
 ## Search & intent
 - `routes/search.py` — `/search` keyword+level search over published entities.

@@ -22,7 +22,7 @@ blocks_router = APIRouter(prefix="/blocks", tags=["blocks"])
 
 def _block_out(block: Block) -> BlockOut:
     """Gate c2pa_verified/c2pa_signer on the config flag, not just the stored
-    column (known-issues §6.8, security.md S-26): real C2PA verification
+    column (known-issues §6.8, security.md S-27): real C2PA verification
     isn't implemented yet, so a stored True must never be served as fact.
     `device_upload` is the honest, trust-free alternative — it only says the
     media arrived via a paired device's upload endpoint."""
@@ -44,6 +44,7 @@ def _block_out(block: Block) -> BlockOut:
                 c2pa_verified=bool(m.c2pa_verified) and settings.c2pa_verification_enabled,
                 c2pa_signer=m.c2pa_signer if settings.c2pa_verification_enabled else None,
                 device_upload=block.title == "Pi CAM Captures",
+                device_signature_verified=m.device_signature_verified,
                 bitcoin_confirmed=m.bitcoin_confirmed,
                 bitcoin_block=m.bitcoin_block,
                 uploaded_at=m.uploaded_at,
