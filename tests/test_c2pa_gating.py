@@ -1,4 +1,4 @@
-"""1.28 — honest c2pa_verified (known-issues §6.8, security.md S-26).
+"""1.28 — honest c2pa_verified (known-issues §6.8, security.md S-27).
 
 `verify_pi_camera_signature()` is a substring match on a client-supplied
 `manifest_json` form field — it cannot prove anything about the uploaded

@@ -696,6 +696,9 @@ async def public_profile_by_slug(
                 # app/core/config.py::c2pa_verification_enabled.
                 "c2pa_verified": bool(m.c2pa_verified) and settings.c2pa_verification_enabled,
                 "device_upload": block.title == "Pi CAM Captures",
+                # 1.29 — real signal: the device's own ECDSA key signed this
+                # file's content. Independent of the still-fake c2pa_verified.
+                "device_signature_verified": m.device_signature_verified,
                 "captured_at": m.captured_at.isoformat() if m.captured_at else None,
                 "bitcoin_confirmed": m.bitcoin_confirmed,
                 "bitcoin_block": m.bitcoin_block,
@@ -767,6 +770,7 @@ async def agent_preview(
                 "c2pa_verified": bool(m.c2pa_verified) and settings.c2pa_verification_enabled,
                 "c2pa_signer": m.c2pa_signer if settings.c2pa_verification_enabled else None,
                 "device_upload": block.title == "Pi CAM Captures",
+                "device_signature_verified": m.device_signature_verified,
                 "captured_at": m.captured_at.isoformat() if m.captured_at else None,
                 "bitcoin_confirmed": m.bitcoin_confirmed,
                 "bitcoin_block": m.bitcoin_block,
@@ -802,6 +806,7 @@ async def get_proof(
 
     registry_data = business.registry_data or {}
     c2pa_proofs = []
+    device_signature_proofs = []
     bitcoin_proofs = []
 
     for block in business.blocks:
@@ -821,6 +826,14 @@ async def get_proof(
                         json.dumps(m.c2pa_manifest).encode()
                     ).hexdigest(),
                     "signer": m.c2pa_signer,
+                })
+            # 1.29 — real, independently verified today (unlike c2pa_proofs
+            # above): the device's own ECDSA key signed this file's content,
+            # checked server-side against devices.device_public_key.
+            if m.device_signature_verified:
+                device_signature_proofs.append({
+                    "media_id": str(m.id),
+                    "content_hash": "sha256:" + m.original_hash if m.original_hash else None,
                 })
             if m.bitcoin_confirmed:
                 bitcoin_proofs.append({
@@ -865,11 +878,13 @@ async def get_proof(
             ).hexdigest() if registry_data else None,
         },
         "c2pa_proofs": c2pa_proofs,
+        "device_signature_proofs": device_signature_proofs,
         "bitcoin_proofs": bitcoin_proofs,
         "proof_depth": {
             "ots_status": ots_status,
             "btc_timestamp_depth": btc_timestamp_depth,
             "c2pa_chain_length": len(c2pa_proofs),
+            "device_signature_count": len(device_signature_proofs),
             "event_count": len(events),
         },
     }

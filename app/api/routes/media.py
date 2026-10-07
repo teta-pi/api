@@ -56,6 +56,7 @@ from app.schemas.media import (
     QRTokenResponse,
 )
 from app.services import c2pa as c2pa_service
+from app.services import device_signature as device_signature_service
 from app.workers.tasks.bitcoin import submit_bitcoin_timestamp
 
 router = APIRouter(prefix="/media", tags=["media"])
@@ -123,6 +124,8 @@ async def device_upload_media(
     file: UploadFile = File(...),
     manifest_json: str | None = Form(None),
     captured_at: str | None = Form(None),
+    content_signature: str | None = Form(None),
+    signature_alg: str | None = Form(None),
     device: Device = Depends(_get_device),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
@@ -130,6 +133,20 @@ async def device_upload_media(
     content = await file.read()
     original_hash = hashlib.sha256(content).hexdigest()
     mime_type = file.content_type or "application/octet-stream"
+
+    # 1.29 — real signal: did this device's own key sign this exact file?
+    # Independent of c2pa_verified below. Never blocks the upload — a
+    # failure (missing fields, legacy pre-14.12 key, wrong key, tampered
+    # content) just leaves the trust signal honestly False.
+    device_signature_verified = device_signature_service.verify_content_signature(
+        content, content_signature, signature_alg, device.device_public_key
+    )
+    if not device_signature_verified:
+        logger.info(
+            "device_signature_verified=False for device %s (missing fields, "
+            "legacy/invalid key, or genuine signature mismatch)",
+            device.id,
+        )
 
     manifest = c2pa_service.extract_c2pa_manifest(content, mime_type)
     if not manifest and manifest_json:
@@ -189,6 +206,7 @@ async def device_upload_media(
         c2pa_manifest=manifest,
         c2pa_verified=c2pa_verified,
         c2pa_signer=c2pa_signer,
+        device_signature_verified=device_signature_verified,
         captured_at=captured_dt,
     )
     db.add(media)
@@ -199,6 +217,7 @@ async def device_upload_media(
         "media_id": media.id,
         "c2pa_verified": c2pa_verified,
         "c2pa_signer": c2pa_signer,
+        "device_signature_verified": device_signature_verified,
         "bitcoin_status": "pending",
         "teta_pi_verified": teta_pi_verified,
     }
@@ -293,6 +312,7 @@ async def verify_media(
         "media_id": media.id,
         "c2pa_verified": c2pa_verified,
         "c2pa_verified_at": media.uploaded_at if c2pa_verified else None,
+        "device_signature_verified": media.device_signature_verified,
         "bitcoin_status": "confirmed" if media.bitcoin_confirmed else "pending",
         "bitcoin_block": media.bitcoin_block,
         "bitcoin_confirmed_at": None,
@@ -464,6 +484,12 @@ async def register_device(
     Called by Pi CAM after scanning the QR code.
     No JWT required — authenticated via short-lived registration token.
     """
+    if not device_signature_service.is_valid_device_public_key(payload.device_public_key):
+        raise HTTPException(
+            status_code=400,
+            detail="device_public_key must be a real SPKI/PEM ECDSA P-256 public key",
+        )
+
     raw = await redis.get(f"cam_reg:{payload.registration_token}")
     if not raw:
         raise HTTPException(status_code=400, detail="Invalid or expired registration token")

@@ -16,6 +16,7 @@ class MediaVerifyResponse(BaseModel):
     media_id: uuid.UUID
     c2pa_verified: bool
     c2pa_verified_at: datetime | None
+    device_signature_verified: bool = False
     bitcoin_status: str
     bitcoin_block: int | None
     bitcoin_confirmed_at: datetime | None
@@ -49,6 +50,7 @@ class DeviceMediaUploadResponse(BaseModel):
     media_id: uuid.UUID
     c2pa_verified: bool
     c2pa_signer: str | None
+    device_signature_verified: bool = False
     bitcoin_status: str
     teta_pi_verified: bool = False
 
