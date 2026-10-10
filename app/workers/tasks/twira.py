@@ -125,6 +125,8 @@ async def _ots_lifecycle_async() -> dict:
             if not ev.ots_proof:
                 continue
             verification = await verify_proof(ev.ots_proof, ev.payload_hash)
+            if verification.get("proof_bytes"):
+                ev.ots_proof = verification["proof_bytes"]
             if verification.get("confirmed"):
                 ev.ots_status = "confirmed"
                 ev.btc_block = verification.get("bitcoin_block")

@@ -57,14 +57,18 @@ async def _check_confirmations_async() -> dict:
             continue
         content_hash = bytes.fromhex(media.original_hash)
         verification = await verify_proof(media.bitcoin_proof, content_hash)
-        if verification["confirmed"]:
+        if verification["confirmed"] or verification["proof_bytes"]:
             async with AsyncSessionLocal() as db:
                 result = await db.execute(select(Media).where(Media.id == media.id))
                 m = result.scalar_one_or_none()
                 if m:
-                    m.bitcoin_confirmed = True
-                    m.bitcoin_block = verification["bitcoin_block"]
+                    if verification["proof_bytes"]:
+                        m.bitcoin_proof = verification["proof_bytes"]
+                    if verification["confirmed"]:
+                        m.bitcoin_confirmed = True
+                        m.bitcoin_block = verification["bitcoin_block"]
                     await db.commit()
-            confirmed += 1
+            if verification["confirmed"]:
+                confirmed += 1
 
     return {"checked": len(pending), "confirmed": confirmed}
