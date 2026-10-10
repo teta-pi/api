@@ -67,8 +67,10 @@ async def verify_proof(proof_bytes: bytes, content_hash: bytes) -> dict:
     """
     try:
         import io
+        from opentimestamps.core.notary import PendingAttestation
         from opentimestamps.core.timestamp import Timestamp, BitcoinBlockHeaderAttestation
         from opentimestamps.core.serialize import StreamDeserializationContext, StreamSerializationContext
+        from opentimestamps.calendar import RemoteCalendar
 
         buf = io.BytesIO(proof_bytes)
         ctx = StreamDeserializationContext(buf)
@@ -76,24 +78,29 @@ async def verify_proof(proof_bytes: bytes, content_hash: bytes) -> dict:
 
         attestations_before = {a for _, a in ts.all_attestations()}
 
-        # Try to upgrade (check Bitcoin confirmation)
-        from opentimestamps.calendar import RemoteCalendar
-        calendars = [
-            "https://alice.btc.calendar.opentimestamps.org",
-            "https://bob.btc.calendar.opentimestamps.org",
-        ]
-        for url in calendars:
-            try:
-                cal = RemoteCalendar(url)
-                # Same pattern as submit_hash: get_timestamp() returns a
-                # Timestamp for our commitment with whatever the calendar
-                # knows now — merge it in, don't discard it.
-                remote_ts = cal.get_timestamp(ts.msg)
-                ts.merge(remote_ts)
-                break
-            except Exception as e:
-                logger.warning("OTS calendar %s failed: %s", url, e)
-                continue
+        # A calendar's PendingAttestation does NOT hang off ts directly — on
+        # submission, calendars wrap the digest in their own nonce op
+        # (OpAppend + OpSHA256) before attesting, so the attestation lives on
+        # a nested sub-timestamp whose .msg is that nonced leaf, not our
+        # content_hash. Walk the ops tree to find it (same way the real
+        # `ots upgrade` CLI does) and query/merge at that sub-stamp — asking
+        # the calendar about ts.msg itself 404s, it was never given that msg.
+        def directly_verified(stamp):
+            if stamp.attestations:
+                yield stamp
+            for sub_stamp in stamp.ops.values():
+                yield from directly_verified(sub_stamp)
+
+        for sub_stamp in directly_verified(ts):
+            for attestation in list(sub_stamp.attestations):
+                if not isinstance(attestation, PendingAttestation):
+                    continue
+                try:
+                    cal = RemoteCalendar(attestation.uri)
+                    remote_ts = cal.get_timestamp(sub_stamp.msg)
+                    sub_stamp.merge(remote_ts)
+                except Exception as e:
+                    logger.warning("OTS calendar %s failed: %s", attestation.uri, e)
 
         attestations_after = {a for _, a in ts.all_attestations()}
         new_proof_bytes = None
