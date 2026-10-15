@@ -1,6 +1,10 @@
 name: Dependency audit (pip-audit)
 
 on:
+  # 15.10: PR trigger added — these ran on main only, so a red result
+  # was never visible on the PR that caused it and could not be made a
+  # required check (an unpatched auth dependency sat red for days).
+  pull_request:
   push:
     branches: [main]
   schedule:

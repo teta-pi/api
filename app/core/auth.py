@@ -1,13 +1,21 @@
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from jose import JWTError, jwt
+import jwt
+from jwt import PyJWTError
 from passlib.context import CryptContext
 
 from app.core.config import settings
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
+# HS256 with a symmetric server secret — never an asymmetric keypair, and the
+# accepted algorithm is pinned here, not read from the token header. That is
+# what kept PYSEC-2026-4298 (python-jose algorithm confusion via a DER-encoded
+# public key used as the HMAC secret) unreachable for us; we moved off
+# python-jose anyway in 15.10 because the advisory has no fix version and this
+# is the authentication path. PyJWT emits byte-identical tokens for our payload,
+# so sessions issued before the migration stay valid.
 ALGORITHM = "HS256"
 
 
@@ -34,6 +42,13 @@ def create_access_token(
 
 def decode_token(token: str) -> dict:
     try:
-        return jwt.decode(token, settings.secret_key, algorithms=[ALGORITHM])
-    except JWTError:
+        # require sub+exp: every token we mint has both, so a crafted one that
+        # omits "exp" (i.e. never expires) is refused rather than trusted.
+        return jwt.decode(
+            token,
+            settings.secret_key,
+            algorithms=[ALGORITHM],
+            options={"require": ["exp", "sub"]},
+        )
+    except PyJWTError:
         raise ValueError("Invalid token")

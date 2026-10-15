@@ -20,6 +20,19 @@ Auth via `Authorization: Bearer <JWT|pk_live_…>`; deps in `api/app/api/deps.py
 | POST | `/auth/avatar` | upload PNG/JPEG/WebP ≤2MB |
 | GET | `/auth/me` | account summary |
 
+Session tokens: HS256 over the symmetric `SECRET_KEY`, minted and verified in
+`app/core/auth.py` with claims `sub` / `exp` / `ver` (`ver` is the
+`logout-all` kill switch). The accepted algorithm is pinned in code and
+`exp`+`sub` are required on decode, so a header-supplied `alg` — `none`
+included — is never honoured. Signed with **PyJWT** since 15.10; it was
+`python-jose` until PYSEC-2026-4298 (and its `ecdsa` dep,
+PYSEC-2026-1325) turned out to have no fix version. Neither advisory was
+reachable in our usage — both need an asymmetric key or ECDSA signing, and we
+have neither — and PyJWT emits byte-identical tokens for this payload, so the
+swap kept every live session valid. `tests/test_auth_token.py` locks the shape
+in. PyJWT is a runtime dependency: it is named in `deploy.yml`'s explicit pip
+install, which is not `pip install .`.
+
 ## Entities & content
 - `routes/businesses.py` — CRUD (owner-checked). `POST /businesses` creates any
   name immediately, free, unverified (L0) — **no registry call**
