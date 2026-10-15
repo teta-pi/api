@@ -46,6 +46,9 @@ class _StubSession:
     async def flush(self) -> None:
         pass
 
+    async def refresh(self, obj, attrs=None) -> None:
+        pass
+
     async def commit(self) -> None:
         pass
 
