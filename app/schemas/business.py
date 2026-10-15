@@ -52,6 +52,11 @@ class BusinessOut(BaseModel):
     claim_status: str
     created_at: datetime
     updated_at: datetime
+    # 1.30 — owner-only (routes/businesses.py::get_business sets these only
+    # when the caller is the owner; None for every other caller/view so
+    # public payloads never carry quota data).
+    blocks_used: int | None = None
+    blocks_allowance: int | None = None
 
 
 class BusinessSearchResult(BaseModel):

@@ -55,6 +55,10 @@ class Settings(BaseSettings):
     # Back Office Analytics tab. See docs/analytics.md.
     goatcounter_db_path: str = "/opt/goatcounter/db/goatcounter.sqlite3"
 
+    # 1.30 — everything free, pay only for extra blocks. 10 included forever;
+    # packs are one-time-forever grants (block_entitlements), never expire.
+    included_block_allowance: int = 10
+
     cors_origins: list[str] = [
         "http://localhost:3000",
         "http://localhost:3001",

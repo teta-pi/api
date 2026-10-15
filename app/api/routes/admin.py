@@ -15,9 +15,11 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_admin
+from app.api.routes.blocks import block_allowance, block_usage
 from app.core.config import settings
 from app.core.database import get_db
 from app.models.audit_log import AdminAuditLog
+from app.models.block_entitlement import GRANT_SOURCES, BlockEntitlement
 from app.models.business import Business
 from app.models.claim import Claim
 from app.models.user import User
@@ -982,4 +984,60 @@ async def admin_revoke_device(
         "device_id": device.id,
         "revoked_at": device.revoked_at,
         "already_revoked": not did_revoke,
+    }
+
+
+# ── Block quota — admin grants (1.30) ──────────────────────────────────────────
+
+
+class GrantBlocksRequest(BaseModel):
+    granted_blocks: int = Field(gt=0)
+    # 'included' | 'pack_10' | 'pack_100' | 'pack_1000' | 'admin' — see
+    # app/models/block_entitlement.py. No Stripe here (session 1.31); this is
+    # the manual/support path (comped packs, migration corrections).
+    source: str = "admin"
+    note: str | None = None
+
+
+@router.post("/entities/{entity_id}/grant-blocks")
+async def grant_blocks(
+    entity_id: uuid.UUID,
+    payload: GrantBlocksRequest,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Grant extra block allowance to an entity. Writes an append-only
+    block_entitlements row — never UPDATE/DELETE an existing grant; a
+    correction is a new compensating row (negative-sum corrections aren't
+    supported here, granted_blocks must be positive; zero out via a 0-sized
+    grant with a note isn't meaningful either — see docs/database.md)."""
+    if payload.source not in GRANT_SOURCES:
+        raise HTTPException(status_code=422, detail=f"source must be one of {sorted(GRANT_SOURCES)}")
+
+    entity = (
+        await db.execute(select(Business).where(Business.id == entity_id))
+    ).scalar_one_or_none()
+    if not entity:
+        raise HTTPException(status_code=404, detail="Entity not found")
+
+    db.add(
+        BlockEntitlement(
+            business_id=entity_id,
+            granted_blocks=payload.granted_blocks,
+            source=payload.source,
+            granted_by=admin.email,
+            note=payload.note,
+        )
+    )
+    await db.flush()
+    await _audit(
+        db, admin, "entities.grant_blocks", target_type="entity", target_id=str(entity_id),
+        detail={"granted_blocks": payload.granted_blocks, "source": payload.source, "note": payload.note},
+    )
+    return {
+        "business_id": entity_id,
+        "granted_blocks": payload.granted_blocks,
+        "source": payload.source,
+        "blocks_used": await block_usage(db, entity_id),
+        "blocks_allowance": await block_allowance(db, entity_id),
     }

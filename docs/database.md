@@ -20,6 +20,10 @@ Docker container `tetapi-postgres` (image `pgvector/pgvector:pg16`).
 | 011 | `businesses.legal_entity_id` (nullable self-FK, brand→legal entity link); asserts append-only trigger from 006 is still attached |
 | 012 | `claims.ops_status` + `ops_status_updated_at` (backoffice outreach tracking) |
 | 013 | `businesses.claim_status` + `pre_verified_source` (bulk pre-verification import, roadmap 1.11) |
+| 014 | `claim_status` widened |
+| 015 | `devices.revoked_at` + nullable `api_key` (device revocation) |
+| 016 | `media.device_signature_verified` |
+| 017 | `block_entitlements` (append-only trigger) — block-quota grants, roadmap 1.30/1.32 (see note below) |
 
 ## Core tables
 - **users** — id, email (unique, plaintext for login/index), `full_name`
@@ -75,6 +79,21 @@ Docker container `tetapi-postgres` (image `pgvector/pgvector:pg16`).
 - **endpoint_probes** — entity_id, ok(bool), at. Feeds TWIRA uptime.
 - **admin_audit_log** (append-only) — actor_id/email, action, target_type/id,
   detail(jsonb), created_at. Trigger blocks all UPDATE/DELETE.
+- **block_entitlements** (append-only, migration 017) — business_id, granted_blocks,
+  `source` (`included | pack_10 | pack_100 | pack_1000 | admin`), granted_by
+  (user id / `system` / admin email), note?, granted_at. Trigger blocks all
+  UPDATE/DELETE, same pattern as admin_audit_log — a correction is a new
+  compensating row, never an edit. No `expires_at`: packs are one-time-forever,
+  there is no renewal concept anywhere in this design. A business's effective
+  block allowance = `settings.included_block_allowance` (10, `app/core/config.py`)
+  + `sum(granted_blocks)` over its rows — computed on read
+  (`routes/blocks.py::block_allowance`), not stored on `businesses`. Enforced
+  only on `POST /businesses/{id}/blocks`; PATCH/DELETE/reorder are unaffected.
+  Model+route history calls this "1.30" (branch `session/1.30-block-quota`) but
+  that number was already taken by the `bitcoin_confirmed` fix
+  ([api PR #36](https://github.com/teta-pi/api/pull/36)/[#37](https://github.com/teta-pi/api/pull/37))
+  — same collision pattern as roadmap rows 1.25/1.26 — so the infra roadmap/
+  changelog row for this is **1.32**.
 
 ## Conventions
 - UUID PKs (`gen_random_uuid()`), timezone-aware timestamps, `func.now()` defaults.

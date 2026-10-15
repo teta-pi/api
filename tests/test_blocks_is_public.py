@@ -41,6 +41,10 @@ class _StubSession:
 def stub_env(monkeypatch: pytest.MonkeyPatch) -> _StubSession:
     monkeypatch.setattr(blocks_route, "_get_owned_business", AsyncMock(return_value=object()))
     monkeypatch.setattr(blocks_route, "generate_embedding", AsyncMock(return_value=None))
+    # 1.30/1.32 quota check runs before block creation — stub it out, this
+    # suite is about is_public, not the allowance (see test_block_quota.py).
+    monkeypatch.setattr(blocks_route, "block_usage", AsyncMock(return_value=0))
+    monkeypatch.setattr(blocks_route, "block_allowance", AsyncMock(return_value=10))
     return _StubSession()
 
 

@@ -2,7 +2,7 @@ import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,6 +11,7 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.models.business import Business
 from app.models.block import Block
+from app.models.block_entitlement import PACK_SIZES, BlockEntitlement
 from app.models.user import User
 from app.schemas.block import BlockCreate, BlockOut, BlockReorder, BlockUpdate, MediaOut
 from app.services.ai import block_embedding_text, generate_embedding
@@ -18,6 +19,28 @@ from app.services.ai import block_embedding_text, generate_embedding
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/businesses/{business_id}/blocks", tags=["blocks"])
 blocks_router = APIRouter(prefix="/blocks", tags=["blocks"])
+
+
+async def block_allowance(db: AsyncSession, business_id: uuid.UUID) -> int:
+    """settings.included_block_allowance + sum of every grant ever made.
+    Grants are append-only and never expire — this is a plain sum, no
+    expiry/renewal logic anywhere in it."""
+    granted = (
+        await db.execute(
+            select(func.coalesce(func.sum(BlockEntitlement.granted_blocks), 0)).where(
+                BlockEntitlement.business_id == business_id
+            )
+        )
+    ).scalar_one()
+    return settings.included_block_allowance + int(granted)
+
+
+async def block_usage(db: AsyncSession, business_id: uuid.UUID) -> int:
+    return (
+        await db.execute(
+            select(func.count(Block.id)).where(Block.business_id == business_id)
+        )
+    ).scalar_one()
 
 
 def _block_out(block: Block) -> BlockOut:
@@ -76,6 +99,19 @@ async def add_block(
     current_user: User = Depends(get_current_user),
 ) -> Block:
     await _get_owned_business(business_id, current_user, db)
+
+    used = await block_usage(db, business_id)
+    allowance = await block_allowance(db, business_id)
+    if used >= allowance:
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "message": "Block allowance reached. Buy a pack to add more blocks.",
+                "used": used,
+                "allowance": allowance,
+                "next_pack": {"source": "pack_10", "blocks": PACK_SIZES["pack_10"]},
+            },
+        )
 
     block = Block(
         business_id=business_id,

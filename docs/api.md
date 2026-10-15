@@ -63,7 +63,21 @@ Auth via `Authorization: Bearer <JWT|pk_live_…>`; deps in `api/app/api/deps.py
   - `GET /businesses/{id}/preview` (agent JSON), `GET /businesses/{id}/proof`,
     `GET /businesses/by-slug/{slug}/public` (published+public only, public
     blocks only — powers `/e/[slug]`; includes the `legal_entity` disclosure).
+  - `GET /businesses/{id}` adds `blocks_used`/`blocks_allowance` (1.30/1.32),
+    **owner view only** — `None` for every other caller. `/preview`, `/proof`
+    and `by-slug/public` use separate response shapes that never carry these
+    fields at all, so there's no leak path to close there.
 - `routes/blocks.py` — block CRUD, owner-checked via parent business.
+  **Block quota (1.30/1.32)**: `POST /businesses/{id}/blocks` enforces an
+  allowance — `settings.included_block_allowance` (10) + sum of the
+  business's `block_entitlements` grants (docs/database.md). At/over the
+  allowance it's `402` with a machine-readable body
+  (`{message, used, allowance, next_pack}`), never a bare 403. PATCH/DELETE
+  /reorder are not gated — only creation counts against the quota. Helpers
+  `block_usage`/`block_allowance` in this module are reused by
+  `GET /businesses/{id}` (owner view) and the admin grant endpoint. No Stripe
+  here — packs are granted via `POST /admin/entities/{id}/grant-blocks`
+  until session 1.31 wires real payment.
 - `routes/media.py` — `/media/upload` (JWT), `/media/device-upload` (api_key),
   local storage under `UPLOAD_DIR`, served at `/media/local/{id}/{name}`.
   `c2pa_verified` is gated behind `settings.c2pa_verification_enabled` (default
@@ -125,6 +139,14 @@ mix, claim→verified funnel — see `docs/analytics.md`), `/admin/users`
 (disposable email / dup registry_id / country mismatch), `POST
 /admin/entities/{id}/validate` (re-check registry → append-only event),
 `/admin/claims`, `/admin/entities`, `/admin/audit-log`.
+
+`POST /admin/entities/{id}/grant-blocks` (1.30/1.32) — body
+`{granted_blocks, source, note?}`, `source` one of `included | pack_10 |
+pack_100 | pack_1000 | admin`. Writes one append-only `block_entitlements`
+row plus the mandatory `admin_audit_log` entry (action
+`entities.grant_blocks`); no payment call here — manual/support comp path
+until Stripe (session 1.31) wires the real packs. Returns the entity's
+updated `blocks_used`/`blocks_allowance`.
 
 `POST /admin/entities/bulk-preverify` (roadmap 1.11, GTM Phase 2 blocker) —
 body `{items: [{name, entity_type?, country?, description?, domain?,
