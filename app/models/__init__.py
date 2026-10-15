@@ -7,6 +7,7 @@ from app.models.claim import Claim
 from app.models.verification_event import VerificationEvent
 from app.models.endpoint_probe import EndpointProbe
 from app.models.audit_log import AdminAuditLog
+from app.models.block_entitlement import BlockEntitlement
 
 __all__ = [
     "User",
@@ -18,4 +19,5 @@ __all__ = [
     "VerificationEvent",
     "EndpointProbe",
     "AdminAuditLog",
+    "BlockEntitlement",
 ]

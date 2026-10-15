@@ -12,6 +12,7 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_optional_user
+from app.api.routes.blocks import block_allowance, block_usage
 from app.core.config import settings
 from app.core.database import get_db, AsyncSessionLocal
 from app.models.business import Business
@@ -276,12 +277,17 @@ async def get_business(
     db: AsyncSession = Depends(get_db),
     current_user: User | None = Depends(get_optional_user),
 ) -> BusinessOut:
-    business, _ = await _get_visible_business(db, business_id, current_user)
+    business, is_owner = await _get_visible_business(db, business_id, current_user)
 
     # 1.8: same as list_businesses — compute for the response, don't assign
     # onto the tracked instance (that turns this GET into a DB write).
     out = BusinessOut.model_validate(business)
     out.verification_level = await _compute_verification_level(db, business)
+    # 1.30: quota is owner-only — never leaked to a public/non-owner read of
+    # this same endpoint (see test_block_quota.py for the absence check).
+    if is_owner:
+        out.blocks_used = await block_usage(db, business.id)
+        out.blocks_allowance = await block_allowance(db, business.id)
     return out
 
 
