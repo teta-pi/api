@@ -2,11 +2,10 @@
 
 This repo is one component of TETA+PI (Trust Infrastructure for Digital
 Entities), split from the platform monorepo 2026-07-13 (see
-[decisions.md](https://github.com/teta-pi/infra/blob/main/docs/decisions.md)
-in `teta-pi/infra` for the split plan).
+`docs/decisions.md` in the private `teta-pi/infra` repo for the split plan).
 
-**Canonical docs, roadmap, changelog, and coding rules live in
-[`teta-pi/infra`](https://github.com/teta-pi/infra)** — read
+**Canonical docs, roadmap, changelog, and coding rules live in the private
+`teta-pi/infra` repo** — read
 `docs/api.md, docs/database.md, docs/registries.md` there before touching this repo, plus `docs/overview.md` and
 `docs/architecture.md` for cross-cutting context. This file is a thin
 pointer only; do not duplicate rules here.
