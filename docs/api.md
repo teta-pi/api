@@ -194,6 +194,27 @@ TXT via DNS-over-HTTPS + `.well-known` file check; both used by
 needed).
 
 ## Conventions
-- Rate limiters and the Handelsregister lock are **in-memory** → correct only under
-  `uvicorn --workers 1`. Move to Redis before scaling.
+- The Handelsregister lock is still **in-memory** → correct only under
+  `uvicorn --workers 1`.
 - Errors: raise `HTTPException`; owner checks compare `owner_id == current_user.id`.
+
+## Rate limiting (S-10, `app/core/ratelimit.py`)
+One shared Redis-backed helper (fixed-window INCR+EXPIRE, atomic via Lua)
+replaced the five per-process `dict` limiters that used to undercount by a
+factor of `worker_count`. Limits/windows stay in `app/core/config.py`, values
+unchanged by this migration.
+
+Failure mode is chosen per endpoint group and passed as `fail_open`:
+- `fail_open=True` — badge (`routes/badge.py`), tag-ping (`routes/tag.py`),
+  claim (`routes/claims.py`), verify-endpoint (`routes/endpoint_verification.py`).
+  These are public/cosmetic; a Redis blip must never turn into a user-facing
+  outage, so it serves unlimited instead.
+- `fail_open=False` — the email-code cooldown + attempts counters
+  (`routes/auth.py`, `services/verification/email_control.py`). These exist
+  specifically to stop brute-forcing a verification code; going unlimited on
+  a Redis outage would open exactly the window the limiter is there to close,
+  so it raises `503` instead.
+
+Either way a Redis outage is never an unhandled `500` — `ratelimit.increment`
+catches `RedisError` and only re-raises as a deliberate `503` for the
+fail-closed groups.
