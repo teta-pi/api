@@ -24,9 +24,8 @@ FastAPI · async SQLAlchemy (asyncpg) · PostgreSQL 16 + pgvector · Alembic ·
 Redis · Celery (OTS lifecycle, endpoint probes, TWIRA recompute) · Python.
 
 ## Docs
-Canonical docs — routes, database schema, registry verifiers, architecture —
-live in [`teta-pi/infra`](https://github.com/teta-pi/infra): see
-`docs/api.md`, `docs/database.md`, `docs/registries.md`.
+Canonical docs live in `teta-pi/infra`, our internal infrastructure docs
+repo (private).
 
 ## License
 MIT © 2026 TETA+PI · tetapi.dev
