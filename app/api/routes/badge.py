@@ -1,12 +1,12 @@
 import hashlib
-import time
-from collections import defaultdict
 from xml.sax.saxutils import escape as xml_escape
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, Depends, Query, Request, Response, status
 from sqlalchemy import String, cast, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import ratelimit
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.redis import get_redis
 from app.models.business import Business
@@ -15,24 +15,18 @@ router = APIRouter(prefix="/badge", tags=["badge"])
 
 _CACHE_CONTROL = "public, max-age=3600"
 
-# Simple in-memory rate limiter, same pattern as /claim (LandingSpec v2.1 §02).
 # Generous limit: this is a public, high-fanout asset endpoint — every README
 # render hits it, and legitimate traffic can arrive from a handful of IPs
-# (e.g. GitHub's camo proxy, which itself caches the image).
-_RATE_LIMIT = 120
-_RATE_WINDOW = 60.0
-_hits: dict[str, list[float]] = defaultdict(list)
-
-
-def _rate_limit(request: Request) -> None:
-    ip = request.headers.get("x-forwarded-for", request.client.host if request.client else "unknown")
-    ip = ip.split(",")[0].strip()
-    now = time.monotonic()
-    window = [t for t in _hits[ip] if now - t < _RATE_WINDOW]
-    if len(window) >= _RATE_LIMIT:
-        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Rate limit exceeded")
-    window.append(now)
-    _hits[ip] = window
+# (e.g. GitHub's camo proxy, which itself caches the image). Public/cosmetic,
+# so a Redis outage fails open (S-10, app/core/ratelimit.py; docs/api.md).
+async def _rate_limit(request: Request) -> None:
+    await ratelimit.enforce_ip(
+        request,
+        bucket="badge",
+        limit=settings.rate_limit_badge,
+        window_seconds=settings.rate_limit_badge_window_seconds,
+        fail_open=True,
+    )
 
 
 def _text_width(text: str) -> int:
@@ -96,7 +90,7 @@ async def get_badge(
     """Public, unauthenticated SVG badge for README embedding (GTM Phase 3
     badge loop). No auth by design — cache headers + a cheap Redis counter
     (not a full audit-log row) keep the high-fanout read cost low."""
-    _rate_limit(request)
+    await _rate_limit(request)
 
     result = await db.execute(
         select(Business).where(

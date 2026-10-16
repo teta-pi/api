@@ -1,11 +1,10 @@
-import time
-from collections import defaultdict
-
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Request, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import ratelimit
+from app.core.config import settings
 from app.core.database import get_db
 from app.models.claim import Claim
 from app.schemas.claim import ClaimCreate, ClaimResponse, ClaimStats
@@ -13,21 +12,16 @@ from app.services.email import send_claim_confirmation
 
 router = APIRouter(prefix="/claim", tags=["claims"])
 
-# Simple in-memory rate limiter: 5 req/min per IP (LandingSpec v2.1 §02)
-_RATE_LIMIT = 5
-_RATE_WINDOW = 60.0
-_hits: dict[str, list[float]] = defaultdict(list)
-
-
-def _rate_limit(request: Request) -> None:
-    ip = request.headers.get("x-forwarded-for", request.client.host if request.client else "unknown")
-    ip = ip.split(",")[0].strip()
-    now = time.monotonic()
-    window = [t for t in _hits[ip] if now - t < _RATE_WINDOW]
-    if len(window) >= _RATE_LIMIT:
-        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Rate limit exceeded")
-    window.append(now)
-    _hits[ip] = window
+# Public waitlist signup, no credential guessing involved — a Redis outage
+# fails open (S-10, app/core/ratelimit.py; reasoning in docs/api.md).
+async def _rate_limit(request: Request) -> None:
+    await ratelimit.enforce_ip(
+        request,
+        bucket="claim",
+        limit=settings.rate_limit_claim,
+        window_seconds=settings.rate_limit_claim_window_seconds,
+        fail_open=True,
+    )
 
 
 @router.post("", response_model=ClaimResponse, status_code=status.HTTP_201_CREATED)
@@ -38,7 +32,7 @@ async def create_claim(
     background: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ) -> ClaimResponse:
-    _rate_limit(request)
+    await _rate_limit(request)
 
     email = payload.email.lower().strip()
 

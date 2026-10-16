@@ -59,6 +59,22 @@ class Settings(BaseSettings):
     # packs are one-time-forever grants (block_entitlements), never expire.
     included_block_allowance: int = 10
 
+    # Rate limiting (S-10, app/core/ratelimit.py). Values unchanged from the
+    # per-process limiters they replace — this task only moves where the
+    # counter lives, not what it's set to. docs/api.md "Rate limiting" has
+    # the fail-open/fail-closed reasoning per group.
+    rate_limit_claim: int = 5
+    rate_limit_claim_window_seconds: int = 60
+    rate_limit_badge: int = 120
+    rate_limit_badge_window_seconds: int = 60
+    rate_limit_tag_ping: int = 240
+    rate_limit_tag_ping_window_seconds: int = 60
+    rate_limit_verify_endpoint: int = 5
+    rate_limit_verify_endpoint_window_seconds: int = 60
+    rate_limit_email_code_cooldown_seconds: int = 60
+    rate_limit_email_code_max_attempts: int = 5
+    rate_limit_email_code_attempts_window_seconds: int = 900  # = email code TTL
+
     cors_origins: list[str] = [
         "http://localhost:3000",
         "http://localhost:3001",
