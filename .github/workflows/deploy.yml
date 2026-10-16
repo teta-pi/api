@@ -54,7 +54,14 @@ jobs:
           # co-tenant can traverse it. Re-assert 700 root:root every deploy (5.11).
           chmod 700 /opt/tetapi/api/certs
           source /opt/tetapi/venv/bin/activate
-          pip install -q email-validator pgvector beautifulsoup4
+          # This deploy installs an explicit list, not `pip install .`, so a new
+          # runtime dependency has to be named here or the service fails to import
+          # on restart. 15.10 added PyJWT (replaces python-jose in core/auth.py).
+          pip install -q email-validator pgvector beautifulsoup4 PyJWT
+          # 15.10: drop the replaced python-jose and its ecdsa dep — both carry
+          # advisories with no fix version (PYSEC-2026-4298 / PYSEC-2026-1325).
+          # Nothing imports them any more; no-op once they are gone.
+          pip uninstall -q -y python-jose ecdsa || true
           alembic upgrade head
           systemctl restart tetapi-api
           sleep 4

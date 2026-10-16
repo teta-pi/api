@@ -76,7 +76,10 @@ def _render_svg(label: str, status_text: str, color: str) -> str:
 
 
 def _svg_response(svg: str, request: Request, status_code: int = 200) -> Response:
-    etag = f'"{hashlib.md5(svg.encode()).hexdigest()}"'
+    # ETag cache key, not a security primitive: usedforsecurity=False is the
+    # fix for B324 here, not a stronger digest — changing the algorithm would
+    # invalidate every cached badge ETag for no gain.
+    etag = f'"{hashlib.md5(svg.encode(), usedforsecurity=False).hexdigest()}"'
     headers = {"Cache-Control": _CACHE_CONTROL, "ETag": etag}
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)

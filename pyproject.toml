@@ -15,7 +15,13 @@ dependencies = [
     "pgvector>=0.3.0",
     "redis>=5.1.0",
     "celery[redis]>=5.4.0",
-    "python-jose[cryptography]>=3.3.0",
+    # 15.10: was python-jose[cryptography]; dropped for PYSEC-2026-4298
+    # (+ its ecdsa dep, PYSEC-2026-1325), neither of which has a fix
+    # version. PyJWT is HS256-byte-compatible, so sessions survived.
+    "PyJWT>=2.10.0",
+    # was transitive via python-jose[cryptography]; we import it directly
+    # (services/c2pa.py, services/device_signature.py, core/crypto.py)
+    "cryptography>=44.0.0",
     "passlib[bcrypt]>=1.7.4",
     "python-multipart>=0.0.12",
     "httpx>=0.27.0",
