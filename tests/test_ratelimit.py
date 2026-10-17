@@ -9,10 +9,21 @@ exercises (covered by the probe's live `rate_limit[verify-endpoint]` check).
 """
 
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from redis.exceptions import RedisError
 
 from app.core import ratelimit
+
+
+def _request(headers: dict[str, str], client_host: str = "203.0.113.9") -> Request:
+    """Minimal Starlette `Request` for `client_ip()` — real header lookup,
+    no network, no app wiring."""
+    scope = {
+        "type": "http",
+        "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()],
+        "client": (client_host, 12345),
+    }
+    return Request(scope)
 
 
 class FakeRedis:
@@ -110,3 +121,26 @@ async def test_redis_outage_fails_closed_as_503_not_500(monkeypatch: pytest.Monk
     with pytest.raises(HTTPException) as exc:
         await ratelimit.increment("k", limit=1, window_seconds=60, fail_open=False)
     assert exc.value.status_code == 503
+
+
+def test_client_ip_ignores_forged_x_forwarded_for() -> None:
+    """S-10 forged-XFF bypass: a client-supplied `X-Forwarded-For` must not
+    change the rate-limit key — nginx on the api vhost never sets that
+    header, so trusting it let a client pick its own counter."""
+    request = _request({"x-forwarded-for": "1.2.3.4"}, client_host="203.0.113.9")
+    assert ratelimit.client_ip(request) == "203.0.113.9"
+
+
+def test_client_ip_prefers_x_real_ip() -> None:
+    """`X-Real-IP` is nginx-set from `$remote_addr` (S-29 `real_ip`
+    config) and is the one header this app can trust."""
+    request = _request(
+        {"x-real-ip": "198.51.100.7", "x-forwarded-for": "1.2.3.4"},
+        client_host="203.0.113.9",
+    )
+    assert ratelimit.client_ip(request) == "198.51.100.7"
+
+
+def test_client_ip_falls_back_to_socket_peer() -> None:
+    request = _request({}, client_host="203.0.113.9")
+    assert ratelimit.client_ip(request) == "203.0.113.9"

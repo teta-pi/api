@@ -50,9 +50,16 @@ return count
 
 
 def client_ip(request: Request) -> str:
+    """Caller's IP for use as a rate-limit key.
+
+    Prefers `X-Real-IP`, which nginx sets from `$remote_addr` (already
+    rewritten to the true client IP for Cloudflare traffic by the S-29
+    `real_ip` config) — not `X-Forwarded-For`, which nginx on the api vhost
+    never sets, so a client-supplied value would reach the app unchecked and
+    let it pick its own rate-limit key (S-10 forged-XFF bypass).
+    """
     default = request.client.host if request.client else "unknown"
-    ip = request.headers.get("x-forwarded-for", default)
-    return ip.split(",")[0].strip()
+    return request.headers.get("x-real-ip", default).strip()
 
 
 async def increment(key: str, *, limit: int, window_seconds: int, fail_open: bool) -> bool:
