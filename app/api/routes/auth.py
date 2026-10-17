@@ -1,27 +1,25 @@
 import logging
 import secrets
 
-import redis.asyncio as aioredis
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.deps import get_current_user
+from app.core import ratelimit
 from app.core.auth import create_access_token, hash_password, verify_password
 from app.core.config import settings
 from app.core.database import get_db
+from app.core.redis import get_redis
 from app.models.user import User
 from app.schemas.user import LoginRequest, MagicLinkRequest, Token
-from app.api.deps import get_current_user
 from app.services.email import send_verification_code
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth", tags=["auth"])
 
-_redis = aioredis.from_url(settings.redis_url, decode_responses=True)
-
 _CODE_TTL = 900  # 15 minutes
-_MAX_ATTEMPTS = 5
 
 
 @router.post("/token", response_model=Token)
@@ -120,20 +118,24 @@ class VerifyCodeRequest(BaseModel):
 async def request_email_code(payload: EmailCodeRequest) -> dict:
     """Send a 6-digit verification code to the email. Code lives 15 min in Redis."""
     email = payload.email.lower().strip()
+    redis = await get_redis()
 
-    # Max 1 send per 60s per email
-    if await _redis.exists(f"email_code_cooldown:{email}"):
-        raise HTTPException(status_code=429, detail="Code already sent — wait a minute before retrying")
+    # Max 1 send per 60s per email. Brute-force-adjacent (spamming codes is
+    # itself an attack surface), so a Redis outage fails closed (503), not
+    # open — same reasoning as the attempts counter below (S-10, docs/api.md).
+    await ratelimit.enforce(
+        f"email_code_cooldown:{email}", limit=1,
+        window_seconds=settings.rate_limit_email_code_cooldown_seconds, fail_open=False,
+    )
 
     code = f"{secrets.randbelow(1_000_000):06d}"
-    await _redis.setex(f"email_code:{email}", _CODE_TTL, code)
-    await _redis.setex(f"email_code_cooldown:{email}", 60, "1")
-    await _redis.delete(f"email_code_attempts:{email}")
+    await redis.setex(f"email_code:{email}", _CODE_TTL, code)
+    await redis.delete(f"email_code_attempts:{email}")
 
     sent = await send_verification_code(email, code)
     if not sent:
         # Don't leave the user locked out by the cooldown for a code that never arrived.
-        await _redis.delete(f"email_code:{email}", f"email_code_cooldown:{email}")
+        await redis.delete(f"email_code:{email}", f"email_code_cooldown:{email}")
         raise HTTPException(status_code=502, detail="Could not send email, try again later")
 
     return {"message": "Verification code sent — check your inbox."}
@@ -146,19 +148,23 @@ async def verify_email_code(
 ) -> dict:
     """Check the 6-digit code; on success create the user (if new) and return a token."""
     email = payload.email.lower().strip()
+    redis = await get_redis()
 
-    attempts = await _redis.incr(f"email_code_attempts:{email}")
-    if attempts == 1:
-        await _redis.expire(f"email_code_attempts:{email}", _CODE_TTL)
-    if attempts > _MAX_ATTEMPTS:
-        await _redis.delete(f"email_code:{email}")
+    # This IS the brute-force protection against guessing the 6-digit code —
+    # a Redis outage must not silently remove it, so it fails closed (503).
+    allowed = await ratelimit.increment(
+        f"email_code_attempts:{email}", limit=settings.rate_limit_email_code_max_attempts,
+        window_seconds=settings.rate_limit_email_code_attempts_window_seconds, fail_open=False,
+    )
+    if not allowed:
+        await redis.delete(f"email_code:{email}")
         raise HTTPException(status_code=429, detail="Too many attempts — request a new code")
 
-    stored = await _redis.get(f"email_code:{email}")
+    stored = await redis.get(f"email_code:{email}")
     if not stored or not secrets.compare_digest(stored, payload.code.strip()):
         raise HTTPException(status_code=400, detail="Invalid or expired code")
 
-    await _redis.delete(f"email_code:{email}", f"email_code_attempts:{email}")
+    await redis.delete(f"email_code:{email}", f"email_code_attempts:{email}")
 
     result = await db.execute(select(User).where(User.email == email))
     user = result.scalar_one_or_none()
@@ -207,18 +213,20 @@ async def request_email_change(
 ) -> dict:
     """Step 1: send a verification code to the NEW address."""
     new_email = payload.new_email.lower().strip()
+    redis = await get_redis()
     existing = await db.execute(select(User).where(User.email == new_email))
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="This email is already in use")
 
-    if await _redis.exists(f"email_code_cooldown:{new_email}"):
-        raise HTTPException(status_code=429, detail="Code already sent — wait a minute")
+    await ratelimit.enforce(
+        f"email_code_cooldown:{new_email}", limit=1,
+        window_seconds=settings.rate_limit_email_code_cooldown_seconds, fail_open=False,
+    )
 
     code = f"{secrets.randbelow(1_000_000):06d}"
-    await _redis.setex(f"email_code:{new_email}", _CODE_TTL, code)
-    await _redis.setex(f"email_code_cooldown:{new_email}", 60, "1")
+    await redis.setex(f"email_code:{new_email}", _CODE_TTL, code)
     # Bind the pending change to this user so nobody else can claim the code
-    await _redis.setex(f"email_change_owner:{new_email}", _CODE_TTL, str(user.id))
+    await redis.setex(f"email_change_owner:{new_email}", _CODE_TTL, str(user.id))
 
     background_tasks.add_task(send_verification_code, new_email, code)
     return {"message": "Verification code sent to the new address."}
@@ -232,16 +240,17 @@ async def confirm_email_change(
 ) -> dict:
     """Step 2: verify the code and switch the account email."""
     new_email = payload.new_email.lower().strip()
+    redis = await get_redis()
 
-    owner = await _redis.get(f"email_change_owner:{new_email}")
+    owner = await redis.get(f"email_change_owner:{new_email}")
     if owner != str(user.id):
         raise HTTPException(status_code=400, detail="No pending email change for this address")
 
-    stored = await _redis.get(f"email_code:{new_email}")
+    stored = await redis.get(f"email_code:{new_email}")
     if not stored or not secrets.compare_digest(stored, payload.code.strip()):
         raise HTTPException(status_code=400, detail="Invalid or expired code")
 
-    await _redis.delete(f"email_code:{new_email}", f"email_change_owner:{new_email}")
+    await redis.delete(f"email_code:{new_email}", f"email_change_owner:{new_email}")
     user.email = new_email
     await db.commit()
     return {"message": "Email updated.", "email": new_email}

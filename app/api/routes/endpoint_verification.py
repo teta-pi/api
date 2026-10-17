@@ -1,15 +1,15 @@
-import time
-from collections import defaultdict
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import String, cast, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
+from app.core import ratelimit
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.ssrf import assert_safe_url
 from app.models.business import Business
@@ -17,25 +17,19 @@ from app.models.user import User
 
 router = APIRouter(prefix="/verify-endpoint", tags=["endpoint-verification"])
 
-# Simple in-memory rate limiter, same pattern as /claim, /badge, /tag (audit
-# #7) — this route makes up to two server-side fetches of a caller-supplied
-# URL per call, so it's rate-limited tighter than the public badge endpoint.
-_RATE_LIMIT = 5
-_RATE_WINDOW = 60.0
-_hits: dict[str, list[float]] = defaultdict(list)
-
-
-def _rate_limit(request: Request) -> None:
-    ip = request.headers.get("x-forwarded-for", request.client.host if request.client else "unknown")
-    ip = ip.split(",")[0].strip()
-    now = time.monotonic()
-    window = [t for t in _hits[ip] if now - t < _RATE_WINDOW]
-    if len(window) >= _RATE_LIMIT:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Rate limit exceeded"
-        )
-    window.append(now)
-    _hits[ip] = window
+# This route makes up to two server-side fetches of a caller-supplied URL per
+# call, so it's rate-limited tighter than the public badge endpoint. Every
+# caller already holds a valid pk_live_ key (get_current_user below) — this
+# limiter is cost/abuse control, not brute-force secrecy, so a Redis outage
+# fails open same as the public endpoints (S-10, app/core/ratelimit.py).
+async def _rate_limit(request: Request) -> None:
+    await ratelimit.enforce_ip(
+        request,
+        bucket="verify-endpoint",
+        limit=settings.rate_limit_verify_endpoint,
+        window_seconds=settings.rate_limit_verify_endpoint_window_seconds,
+        fail_open=True,
+    )
 
 
 class EndpointVerifyRequest(BaseModel):
@@ -113,7 +107,7 @@ async def verify_endpoint(
     # docs/decisions.md), rather than relaxing this route back to anonymous.
     current_user: User = Depends(get_current_user),
 ) -> dict:
-    _rate_limit(request)
+    await _rate_limit(request)
     # S-16: validate the caller-supplied URL BEFORE any server-side fetch —
     # scheme, no-literal-IP, public-resolving host, port 80/443. Raises 400.
     # Both fetches below use this same validated URL. (docs/security.md §4/S-16)

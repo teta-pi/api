@@ -1,6 +1,5 @@
 import json
 import time
-from collections import defaultdict
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
@@ -9,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.routes.businesses import _compute_verification_level
+from app.core import ratelimit
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.redis import get_redis
@@ -19,13 +19,6 @@ router = APIRouter(tags=["tag"])
 
 _WK_CACHE_CONTROL = "public, max-age=300"  # ~5 min (docs/universal-tag.md §Part B)
 
-# Same in-memory limiter pattern as badge.py (B5, docs/security.md) — generous
-# since it's one hit per page load on every installed site. Redis migration
-# for multi-worker is tracked as S-10; not needed at current single-worker scale.
-_RATE_LIMIT = 240
-_RATE_WINDOW = 60.0
-_hits: dict[str, list[float]] = defaultdict(list)
-
 # Bounded per-entity page list, capped via ZREMRANGEBYRANK — a Redis sorted
 # set, not a new DB table (12.5b storage decision: option (a), same (a)/(b)
 # choice flagged for 2.4; see docs/decisions.md). Cheap append, no per-hit
@@ -33,15 +26,17 @@ _hits: dict[str, list[float]] = defaultdict(list)
 _MAX_PAGES_PER_ENTITY = 200
 
 
-def _rate_limit(request: Request) -> None:
-    ip = request.headers.get("x-forwarded-for", request.client.host if request.client else "unknown")
-    ip = ip.split(",")[0].strip()
-    now = time.monotonic()
-    window = [t for t in _hits[ip] if now - t < _RATE_WINDOW]
-    if len(window) >= _RATE_LIMIT:
-        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Rate limit exceeded")
-    window.append(now)
-    _hits[ip] = window
+# Generous since it's one hit per page load on every installed site.
+# Anonymous/public beacon, no credential guessing — fails open on a Redis
+# outage (S-10, app/core/ratelimit.py; docs/api.md).
+async def _rate_limit(request: Request) -> None:
+    await ratelimit.enforce_ip(
+        request,
+        bucket="tag-ping",
+        limit=settings.rate_limit_tag_ping,
+        window_seconds=settings.rate_limit_tag_ping_window_seconds,
+        fail_open=True,
+    )
 
 
 class TagPingIn(BaseModel):
@@ -73,7 +68,7 @@ async def tag_ping(
     docs/universal-tag.md). Always 204, even for an unknown/spoofed
     entity_id — the response must never disclose whether an entity exists,
     matching tag.js's "fails silently, never blocks render" contract."""
-    _rate_limit(request)
+    await _rate_limit(request)
 
     business = await _find_business(db, payload.entity_id)
     if business is not None:
