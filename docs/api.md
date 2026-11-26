@@ -93,6 +93,16 @@ install, which is not `pip install .`.
   until session 1.31 wires real payment.
 - `routes/media.py` — `/media/upload` (JWT), `/media/device-upload` (api_key),
   local storage under `UPLOAD_DIR`, served at `/media/local/{id}/{name}`.
+  **Files follow their rows (1.35, S-36).** `GET /media/local/{id}/{name}`
+  serves a file only while `media.storage_url` or `users.avatar_url` holds that
+  exact URL (indexed lookups, migration 018); a file on disk with no row is 404.
+  Every path that drops a reference removes the file and its `<id>/` dir
+  **after** its commit: `DELETE /media/{id}`, `DELETE /blocks/{id}` (cascade),
+  `POST /auth/avatar` (the replaced avatar), `POST /auth/delete-account` and
+  `POST /admin/users/{id}/anonymize` (both now also clear `avatar_url`). A
+  failed unlink is retried 3x, then logged at ERROR; the file is already
+  unservable, and the owner-run orphan sweep removes it. Shared helpers:
+  `app/services/media_files.py`.
   `c2pa_verified` is gated behind `settings.c2pa_verification_enabled` (default
   `False`, `app/core/config.py`) — until real C2PA manifest verification
   exists, `verify_pi_camera_signature()` is only a substring match on a

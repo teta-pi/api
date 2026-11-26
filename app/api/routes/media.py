@@ -1,11 +1,9 @@
 import hashlib
 import json
 import logging
-import os
 import secrets
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 
 from sqlalchemy.exc import IntegrityError
 
@@ -15,25 +13,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
-
-# Local filesystem storage fallback (used when S3/MinIO is not configured)
-_UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "/opt/tetapi/uploads"))
-
-
-def _save_local(content: bytes, filename: str) -> str:
-    """Save file to local disk, return storage URL."""
-    try:
-        _UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-        file_id = uuid.uuid4().hex
-        safe_name = Path(filename).name or "file"
-        dest = _UPLOAD_DIR / file_id / safe_name
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(content)
-        return f"/media/local/{file_id}/{safe_name}"
-    except Exception as e:
-        logger.warning("Local storage failed: %s", e)
-        return f"local://tetapi-media/{uuid.uuid4()}/{filename}"
-
 
 from app.api.deps import get_current_user
 from app.core.config import settings
@@ -57,7 +36,11 @@ from app.schemas.media import (
 )
 from app.services import c2pa as c2pa_service
 from app.services import device_signature as device_signature_service
+from app.services import media_files
 from app.workers.tasks.bitcoin import submit_bitcoin_timestamp
+
+# Kept as a module attribute: the upload tests patch `media_route._save_local`.
+_save_local = media_files.save_local
 
 router = APIRouter(prefix="/media", tags=["media"])
 devices_router = APIRouter(prefix="/devices", tags=["devices"])
@@ -282,13 +265,22 @@ async def upload_media(
 
 
 @router.get("/local/{file_id}/{filename}")
-async def serve_local_media(file_id: str, filename: str) -> FileResponse:
-    """Serve locally stored media files."""
-    base = _UPLOAD_DIR.resolve()
-    path = (base / file_id / filename).resolve()
-    if not path.is_relative_to(base):
+async def serve_local_media(
+    file_id: str,
+    filename: str,
+    db: AsyncSession = Depends(get_db),
+) -> FileResponse:
+    """Serve a locally stored file — only while a row still owns it (S-36).
+
+    A file on disk is not proof it should be public: a deleted media row, a
+    failed unlink or a crash between save and commit all leave bytes behind.
+    So the exact URL must be referenced by `media.storage_url` or
+    `users.avatar_url`; otherwise 404, same as a missing file (no oracle).
+    """
+    path = media_files.resolve(file_id, filename)
+    if path is None or not path.is_file():
         raise HTTPException(status_code=404, detail="File not found")
-    if not path.exists() or not path.is_file():
+    if not await media_files.is_referenced(db, media_files.local_url(file_id, filename)):
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(path)
 
@@ -347,8 +339,12 @@ async def delete_media(
     if owner_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not your media")
 
+    storage_url = media.storage_url
     await db.delete(media)
-    await db.flush()
+    # Commit first: the file goes only once the row is durably gone, so a
+    # failed delete never loses the bytes of media that still exists (S-36).
+    await db.commit()
+    await media_files.unlink_unreferenced(db, [storage_url])
 
 
 # ── Device registration (QR token flow) ──────────────────────────────────────
