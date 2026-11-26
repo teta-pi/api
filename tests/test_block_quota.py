@@ -29,6 +29,12 @@ class _Scalar:
     def scalar_one_or_none(self):
         return self._value
 
+    def scalars(self):
+        return self
+
+    def all(self):
+        return self._value or []
+
 
 class _StubSession:
     """Queued results per execute() call, in call order."""
@@ -190,6 +196,9 @@ async def test_delete_block_ignores_quota(monkeypatch: pytest.MonkeyPatch) -> No
     class _DelSession(_StubSession):
         async def delete(self, obj) -> None:
             self.deleted = obj
+
+        async def commit(self) -> None:  # 1.35: delete_block commits before unlinking
+            pass
 
     db = _DelSession(block)
     await blocks_route.delete_block(

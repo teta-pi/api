@@ -24,6 +24,7 @@ from app.models.business import Business
 from app.models.claim import Claim
 from app.models.user import User
 from app.models.verification_event import VerificationEvent
+from app.services import media_files
 from app.services.analytics import get_goatcounter_stats
 from app.api.routes.businesses import _slugify
 
@@ -778,8 +779,10 @@ async def anonymize_user(
         raise HTTPException(status_code=400, detail="Cannot anonymize an admin account")
 
     old_email = user.email
+    old_avatar = user.avatar_url
     user.email = f"deleted-{user.id.hex[:12]}@anon.tetapi.dev"
     user.full_name = None
+    user.avatar_url = None  # the face is PII too (1.35 / S-36)
     user.hashed_password = None
     user.api_key = None
     user.is_active = False
@@ -799,6 +802,7 @@ async def anonymize_user(
         e.is_public = False
 
     await db.commit()
+    await media_files.unlink_unreferenced(db, [old_avatar])
     await _audit(
         db, admin, "users.anonymize", target_type="user", target_id=str(user_id),
         detail={"entities_unpublished": len(entities), "claims_wiped": len(claims)},

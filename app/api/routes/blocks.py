@@ -12,8 +12,10 @@ from app.core.database import get_db
 from app.models.business import Business
 from app.models.block import Block
 from app.models.block_entitlement import PACK_SIZES, BlockEntitlement
+from app.models.media import Media
 from app.models.user import User
 from app.schemas.block import BlockCreate, BlockOut, BlockReorder, BlockUpdate, MediaOut
+from app.services import media_files
 from app.services.ai import block_embedding_text, generate_embedding
 
 logger = logging.getLogger(__name__)
@@ -264,4 +266,11 @@ async def delete_block(
     if not block:
         raise HTTPException(status_code=404, detail="Block not found")
     await _get_owned_business(block.business_id, current_user, db)
+    # The ORM cascade (Block.media, delete-orphan) drops the media rows; their
+    # files must go too (S-36). Collect the URLs first, unlink after commit.
+    storage_urls = (
+        await db.execute(select(Media.storage_url).where(Media.block_id == block_id))
+    ).scalars().all()
     await db.delete(block)
+    await db.commit()
+    await media_files.unlink_unreferenced(db, storage_urls)

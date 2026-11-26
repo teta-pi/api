@@ -14,6 +14,7 @@ from app.core.database import get_db
 from app.core.redis import get_redis
 from app.models.user import User
 from app.schemas.user import LoginRequest, MagicLinkRequest, Token
+from app.services import media_files
 from app.services.email import send_verification_code
 
 logger = logging.getLogger(__name__)
@@ -284,8 +285,10 @@ async def delete_own_account(
     from app.models.claim import Claim
 
     old_email = user.email
+    old_avatar = user.avatar_url
     user.email = f"deleted-{user.id.hex[:12]}@anon.tetapi.dev"
     user.full_name = None
+    user.avatar_url = None  # the face is PII too (1.35 / S-36)
     user.hashed_password = None
     user.api_key = None
     user.is_active = False
@@ -304,6 +307,7 @@ async def delete_own_account(
         e.is_public = False
 
     await db.commit()
+    await media_files.unlink_unreferenced(db, [old_avatar])
     return {"status": "deleted"}
 
 
@@ -332,11 +336,12 @@ async def upload_avatar(
     if len(content) > 2 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="Max 2 MB")
 
-    from app.api.routes.media import _save_local
-
     ext = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}[file.content_type]
-    user.avatar_url = _save_local(content, f"avatar.{ext}")
+    old_avatar = user.avatar_url
+    user.avatar_url = media_files.save_local(content, f"avatar.{ext}")
     await db.commit()
+    # A replaced avatar was never removed before 1.35 (S-36 sibling).
+    await media_files.unlink_unreferenced(db, [old_avatar])
     return {"avatar_url": user.avatar_url}
 
 
